@@ -1,0 +1,158 @@
+2026-09-24 22:20:12 | INFO     | 
+=== OBTER_SALDOS_FINAIS ===
+2026-09-24 22:20:12 | INFO     | Lendo ficheiro: /tmp/fimano_idmow6n9/Saldos.dbf
+2026-09-24 22:20:12 | INFO     | Registos lidos: 12
+2026-09-24 22:20:12 | INFO     | Colunas disponíveis: ['CONTA', 'TIPO', 'VALOR']
+2026-09-24 22:20:12 | INFO     | 
+Contas encontradas:
+2026-09-24 22:20:12 | INFO     |   SALDO ADMINISTRAÇÃO INICIAL   : 0.00
+2026-09-24 22:20:12 | INFO     |   Depósito Poupança_I           : 0.00
+2026-09-24 22:20:12 | INFO     |   Depósito Ordem_I              : 6710.15
+2026-09-24 22:20:12 | INFO     |   Numerário Caixa_I             : 0.00
+2026-09-24 22:20:12 | INFO     |   SALDO ADMINISTRAÇÃO FINAL     : 0.00
+2026-09-24 22:20:12 | INFO     |   Depósito Poupança_F           : 0.0
+2026-09-24 22:20:12 | INFO     |   Depósito Ordem_F              : 10662.27
+2026-09-24 22:20:12 | INFO     |   Numerário Caixa_F             : 0.0
+2026-09-24 22:20:12 | INFO     |   JUROS DEPOSITOS RECEBIDOS     : 0.00
+2026-09-24 22:20:12 | INFO     |   Juros                         : 0.0
+2026-09-24 22:20:12 | INFO     |   Saldo Exercício               : 3952.12
+2026-09-24 22:20:12 | INFO     |   Saldo Final                   : 10662.27
+2026-09-24 22:20:12 | INFO     | 
+Buscando saldos finais:
+2026-09-24 22:20:12 | INFO     |   Padrão 'POUPANÇA_F' encontrado em 'Depósito Poupança_F           ': 0.0
+2026-09-24 22:20:12 | INFO     |   Padrão 'ORDEM_F' encontrado em 'Depósito Ordem_F              ': 10662.27
+2026-09-24 22:20:12 | INFO     |   Padrão 'CAIXA_F' encontrado em 'Numerário Caixa_F             ': 0.0
+2026-09-24 22:20:12 | INFO     | 
+✅ Saldos finais obtidos:
+2026-09-24 22:20:12 | INFO     |   Poupança_F: 0.00 €
+2026-09-24 22:20:12 | INFO     |   Ordem_F: 10662.27 €
+2026-09-24 22:20:12 | INFO     |   Caixa_F: 0.00 €
+2026-09-24 22:20:12 | INFO     |   TOTAL: 10662.27 €
+2026-09-24 22:20:12 | INFO     | 
+RESULTADO SALDOS FINAIS:
+2026-09-24 22:20:12 | INFO     | {'poupanca_f': 0.0, 'ordem_f': 10662.27, 'caixa_f': 0.0, 'total': 10662.27}
+2026-09-24 22:20:12 | INFO     | ✓ Padrões de saldo correctos
+2026-09-24 22:20:12 | INFO     | 
+=== ZERAR_SALDOS ===
+2026-09-24 22:20:12 | INFO     | Ficheiro: /tmp/fimano_idmow6n9/Saldos.dbf
+2026-09-24 22:20:12 | INFO     | Valores recebidos:
+2026-09-24 22:20:12 | INFO     |   Poupança_novo: 0.00 €
+2026-09-24 22:20:12 | INFO     |   Ordem_novo: 10662.27 €
+2026-09-24 22:20:12 | INFO     |   Caixa_novo: 0.00 €
+2026-09-24 22:20:12 | INFO     | 
+Atualizando Saldos.dbf/SQLite...
+2026-09-24 22:20:12 | INFO     |   ✓ Atualizando DEPÓSITO POUPANÇA_I: 0.00
+2026-09-24 22:20:12 | INFO     |   ✓ Atualizando DEPÓSITO ORDEM_I: 10662.27
+2026-09-24 22:20:12 | INFO     |   ✓ Atualizando NUMERÁRIO CAIXA_I: 0.00
+2026-09-24 22:20:12 | INFO     |   ✓ Zerando DEPÓSITO POUPANÇA_F
+2026-09-24 22:20:12 | INFO     |   ✓ Zerando DEPÓSITO ORDEM_F
+2026-09-24 22:20:12 | INFO     |   ✓ Zerando NUMERÁRIO CAIXA_F
+2026-09-24 22:20:12 | INFO     |   ✓ Zerando JUROS
+2026-09-24 22:20:12 | INFO     |   ✓ Zerando SALDO EXERCÍCIO
+2026-09-24 22:20:12 | INFO     |   ✓ Zerando SALDO FINAL
+2026-09-24 22:20:12 | INFO     | ✅ Saldos.dbf/SQLite atualizado com sucesso!
+2026-09-24 22:20:12 | INFO     | 
+Atualizando Balanco.dbf/SQLite em: /tmp/fimano_idmow6n9/Balanco.dbf
+2026-09-24 22:20:12 | INFO     |   ✓ Atualizando a) Depósito Poupança: 0.00
+2026-09-24 22:20:12 | INFO     |   ✓ Atualizando b) Depósito Ordem: 10662.27
+2026-09-24 22:20:12 | INFO     |   ✓ Atualizando c) Numerário Caixa: 0.00
+2026-09-24 22:20:12 | INFO     | ✅ Balanco.dbf/SQLite atualizado com sucesso!
+2026-09-24 22:20:12 | INFO     | zerar_saldos:
+2026-09-24 22:20:12 | INFO     | True
+2026-09-24 22:20:12 | INFO     |   Após passagem: 'Depósito Ordem_I' = 10662.27
+2026-09-24 22:20:12 | INFO     |   Após passagem: 'Depósito Ordem_F' = 0.0
+2026-09-24 22:20:12 | INFO     | 
+✓ Passagem de saldos (Saldos) validada em cópia de teste
+2026-09-24 22:20:12 | INFO     | TMP left at
+2026-09-24 22:20:12 | INFO     | /tmp/fimano_idmow6n9
+2026-09-24 22:20:12 | INFO     | (pode apagar)
+2026-09-24 22:20:22 | INFO     | import OK
+2026-09-24 22:20:22 | INFO     | 
+=== OBTER_SALDOS_FINAIS ===
+2026-09-24 22:20:22 | INFO     | Lendo ficheiro: /tmp/fimano_3fhce510/Saldos.dbf
+2026-09-24 22:20:22 | INFO     | Registos lidos: 12
+2026-09-24 22:20:22 | INFO     | Colunas disponíveis: ['CONTA', 'TIPO', 'VALOR']
+2026-09-24 22:20:22 | INFO     | 
+Contas encontradas:
+2026-09-24 22:20:22 | INFO     |   SALDO ADMINISTRAÇÃO INICIAL   : 0.00
+2026-09-24 22:20:22 | INFO     |   Depósito Poupança_I           : 0.00
+2026-09-24 22:20:22 | INFO     |   Depósito Ordem_I              : 6710.15
+2026-09-24 22:20:22 | INFO     |   Numerário Caixa_I             : 0.00
+2026-09-24 22:20:22 | INFO     |   SALDO ADMINISTRAÇÃO FINAL     : 0.00
+2026-09-24 22:20:22 | INFO     |   Depósito Poupança_F           : 0.0
+2026-09-24 22:20:22 | INFO     |   Depósito Ordem_F              : 10662.27
+2026-09-24 22:20:22 | INFO     |   Numerário Caixa_F             : 0.0
+2026-09-24 22:20:22 | INFO     |   JUROS DEPOSITOS RECEBIDOS     : 0.00
+2026-09-24 22:20:22 | INFO     |   Juros                         : 0.0
+2026-09-24 22:20:22 | INFO     |   Saldo Exercício               : 3952.12
+2026-09-24 22:20:22 | INFO     |   Saldo Final                   : 10662.27
+2026-09-24 22:20:22 | INFO     | 
+Buscando saldos finais:
+2026-09-24 22:20:22 | INFO     |   Padrão 'POUPANÇA_F' encontrado em 'Depósito Poupança_F           ': 0.0
+2026-09-24 22:20:22 | INFO     |   Padrão 'ORDEM_F' encontrado em 'Depósito Ordem_F              ': 10662.27
+2026-09-24 22:20:22 | INFO     |   Padrão 'CAIXA_F' encontrado em 'Numerário Caixa_F             ': 0.0
+2026-09-24 22:20:22 | INFO     | 
+✅ Saldos finais obtidos:
+2026-09-24 22:20:22 | INFO     |   Poupança_F: 0.00 €
+2026-09-24 22:20:22 | INFO     |   Ordem_F: 10662.27 €
+2026-09-24 22:20:22 | INFO     |   Caixa_F: 0.00 €
+2026-09-24 22:20:22 | INFO     |   TOTAL: 10662.27 €
+2026-09-24 22:20:22 | INFO     | RESULTADO
+2026-09-24 22:20:22 | INFO     | {'poupanca_f': 0.0, 'ordem_f': 10662.27, 'caixa_f': 0.0, 'total': 10662.27}
+2026-09-24 22:20:22 | INFO     | ordem expected 10662.27 got
+2026-09-24 22:20:22 | INFO     | 10662.27
+2026-09-24 22:20:22 | INFO     | 
+=== ZERAR_SALDOS ===
+2026-09-24 22:20:22 | INFO     | Ficheiro: /tmp/fimano_3fhce510/Saldos.dbf
+2026-09-24 22:20:22 | INFO     | Valores recebidos:
+2026-09-24 22:20:22 | INFO     |   Poupança_novo: 0.00 €
+2026-09-24 22:20:22 | INFO     |   Ordem_novo: 10662.27 €
+2026-09-24 22:20:22 | INFO     |   Caixa_novo: 0.00 €
+2026-09-24 22:20:22 | INFO     | 
+Atualizando Saldos.dbf/SQLite...
+2026-09-24 22:20:22 | INFO     |   ✓ Atualizando DEPÓSITO POUPANÇA_I: 0.00
+2026-09-24 22:20:22 | INFO     |   ✓ Atualizando DEPÓSITO ORDEM_I: 10662.27
+2026-09-24 22:20:22 | INFO     |   ✓ Atualizando NUMERÁRIO CAIXA_I: 0.00
+2026-09-24 22:20:22 | INFO     |   ✓ Zerando DEPÓSITO POUPANÇA_F
+2026-09-24 22:20:22 | INFO     |   ✓ Zerando DEPÓSITO ORDEM_F
+2026-09-24 22:20:22 | INFO     |   ✓ Zerando NUMERÁRIO CAIXA_F
+2026-09-24 22:20:22 | INFO     |   ✓ Zerando JUROS
+2026-09-24 22:20:22 | INFO     |   ✓ Zerando SALDO EXERCÍCIO
+2026-09-24 22:20:22 | INFO     |   ✓ Zerando SALDO FINAL
+2026-09-24 22:20:22 | INFO     | ✅ Saldos.dbf/SQLite atualizado com sucesso!
+2026-09-24 22:20:22 | INFO     | 
+Atualizando Balanco.dbf/SQLite em: /tmp/fimano_3fhce510/Balanco.dbf
+2026-09-24 22:20:22 | INFO     |   ✓ Atualizando a) Depósito Poupança: 0.00
+2026-09-24 22:20:22 | INFO     |   ✓ Atualizando b) Depósito Ordem: 10662.27
+2026-09-24 22:20:22 | INFO     |   ✓ Atualizando c) Numerário Caixa: 0.00
+2026-09-24 22:20:22 | INFO     | ✅ Balanco.dbf/SQLite atualizado com sucesso!
+2026-09-24 22:20:22 | INFO     | zerar ok
+2026-09-24 22:20:22 | INFO     | True
+2026-09-24 22:20:22 | INFO     | 'SALDO ADMINISTRAÇÃO INICIAL   '
+2026-09-24 22:20:22 | INFO     | 0.00
+2026-09-24 22:20:22 | INFO     | 'Depósito Poupança_I           '
+2026-09-24 22:20:22 | INFO     | 0.0
+2026-09-24 22:20:22 | INFO     | 'Depósito Ordem_I              '
+2026-09-24 22:20:22 | INFO     | 10662.27
+2026-09-24 22:20:22 | INFO     | 'Numerário Caixa_I             '
+2026-09-24 22:20:22 | INFO     | 0.0
+2026-09-24 22:20:22 | INFO     | 'SALDO ADMINISTRAÇÃO FINAL     '
+2026-09-24 22:20:22 | INFO     | 0.00
+2026-09-24 22:20:22 | INFO     | 'Depósito Poupança_F           '
+2026-09-24 22:20:22 | INFO     | 0.0
+2026-09-24 22:20:22 | INFO     | 'Depósito Ordem_F              '
+2026-09-24 22:20:22 | INFO     | 0.0
+2026-09-24 22:20:22 | INFO     | 'Numerário Caixa_F             '
+2026-09-24 22:20:22 | INFO     | 0.0
+2026-09-24 22:20:22 | INFO     | 'JUROS DEPOSITOS RECEBIDOS     '
+2026-09-24 22:20:22 | INFO     | 0.00
+2026-09-24 22:20:22 | INFO     | 'Juros                         '
+2026-09-24 22:20:22 | INFO     | 0.0
+2026-09-24 22:20:22 | INFO     | 'Saldo Exercício               '
+2026-09-24 22:20:22 | INFO     | 0.0
+2026-09-24 22:20:22 | INFO     | 'Saldo Final                   '
+2026-09-24 22:20:22 | INFO     | 0.0
+2026-09-24 22:20:22 | INFO     | DONE
+2026-09-24 22:20:40 | INFO     | after Fim_Ano
+2026-09-24 22:20:40 | INFO     | funcs
+2026-09-24 22:20:40 | INFO     | True
