@@ -3,7 +3,7 @@ Configuracoes_Gui.py - Widget de configurações (Configs, Contas, Regras e Anal
 Funcionalidades:
 - Aba "Configurações" com quatro sub-abas: "Analisar CSV", "Configs", "Contas" e "Regras"
 - Aba "Regras": CRUD completo sobre regras_classificacao (tabela relacional)
-  - Colunas: Prioridade | Nome | Pattern | Classe | Conta | Valor
+  - Colunas: Prioridade | Classe | Conta | Pattern | Normal | Extra
   - Insert/Delete com teclado (Ins / Del) ou botões
   - Combo para Classe (RECEITA/DESPESA) e Conta (lista de contas ativas)
   - Grava directamente na DB via RegrasRepo (V5)
@@ -286,12 +286,13 @@ class ContasTableModel(QAbstractTableModel):
 # Model + Delegates para a aba Regras
 # ──────────────────────────────────────────────────────────────────────────────
 
-_REGRAS_HEADERS  = ["Prioridade", "Classe", "Conta", "Pattern", "Valor"]
+_REGRAS_HEADERS  = ["Prioridade", "Classe", "Conta", "Pattern", "Normal", "Extra"]
 _COL_PRIO   = 0
 _COL_CLASSE = 1
 _COL_CONTA  = 2
 _COL_PAT    = 3
-_COL_VALOR  = 4
+_COL_NORMAL = 4
+_COL_EXTRA  = 5
 
 _CLASSE_OPCOES = ["RECEITA", "DESPESA"]
 
@@ -305,7 +306,7 @@ class RegrasTableModel(QAbstractTableModel):
 
     def __init__(self):
         super().__init__()
-        self._rows: list[dict] = []   # [{"_id", "Prioridade", "Conta", "Pattern", "Classe", "Valor"}, ...]
+        self._rows: list[dict] = []   # [{"_id", "Prioridade", "Classe", "Conta", "Pattern", "Normal", "Extra"}, ...]
         self._dirty = False
 
     # ── QAbstractTableModel API ───────────────────────────────────────────────
@@ -335,18 +336,32 @@ class RegrasTableModel(QAbstractTableModel):
                 return "" if role == Qt.ItemDataRole.DisplayRole else QVariant()
             return str(val) if col != _COL_PRIO else int(val)
         if role == Qt.ItemDataRole.TextAlignmentRole:
-            if col in (_COL_PRIO, _COL_VALOR):
+            if col in (_COL_PRIO, _COL_NORMAL, _COL_EXTRA):
                 return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
             return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         if role == Qt.ItemDataRole.BackgroundRole:
+            # Células Normal/Extra de quotas: fundo cinza (só leitura)
+            if col in (_COL_NORMAL, _COL_EXTRA):
+                conta = str(row.get("Conta") or "").strip().upper()
+                classe = str(row.get("Classe") or "").strip().upper()
+                if classe == "RECEITA" and conta.startswith("QUOTA"):
+                    return QBrush(QColor("#E8E8E8"))
             if index.row() % 2 == 0:
                 return QBrush(QColor("#F5F5F5"))
         return QVariant()
 
     def flags(self, index):
-        return (Qt.ItemFlag.ItemIsEnabled |
-                Qt.ItemFlag.ItemIsSelectable |
-                Qt.ItemFlag.ItemIsEditable)
+        base = (Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+        if not index.isValid():
+            return Qt.ItemFlag.NoItemFlags
+        # Normal/Extra de regras de QUOTA vêm de Condóminos — só leitura
+        if index.column() in (_COL_NORMAL, _COL_EXTRA):
+            row = self._rows[index.row()]
+            conta = str(row.get("Conta") or "").strip().upper()
+            classe = str(row.get("Classe") or "").strip().upper()
+            if classe == "RECEITA" and conta.startswith("QUOTA"):
+                return base  # não editável
+        return base | Qt.ItemFlag.ItemIsEditable
 
     def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
         if not index.isValid() or role != Qt.ItemDataRole.EditRole:
@@ -358,23 +373,22 @@ class RegrasTableModel(QAbstractTableModel):
         self.dataChanged.emit(index, index)
         return True
 
+    # ── Helpers públicos ──────────────────────────────────────────────────────
     def load(self, pasta: Path):
-        """Carrega TODAS as regras activas da DB.
+        """Carrega TODAS as regras activas, ordenadas por Classe e Conta.
 
-        Schema real (Database.py):
-          id, prioridade, classe, conta, pattern, normal, extra, ativo
+        Schema real: id, prioridade, classe, conta, pattern, normal, extra, ativo
         """
         self.beginResetModel()
         self._rows = []
         try:
             repo = RegrasRepo(pasta)
-            rows = repo.find_ativas()  # SELECT * WHERE ativo=1 — todas
-
+            rows = list(repo.find_ativas())
+            # DESPESA primeiro, depois RECEITA; dentro de cada classe por PRIORIDADE
             rows.sort(key=lambda r: (
-                0 if (r["classe"] or "").upper() == "RECEITA" else 1,    #(r["conta"] or "").upper(),
+                0 if (r["classe"] or "").upper() == "DESPESA" else 1,      # (r["conta"] or "").upper(),
                 int(r["prioridade"] or 100),
             ))
-
             print(f"📋 Regras.load() pasta={pasta}  db={db_path(pasta)}  n_rows={len(rows)}")
             for r in rows:
                 self._rows.append({
@@ -383,8 +397,8 @@ class RegrasTableModel(QAbstractTableModel):
                     "Conta":      r["conta"] or "",
                     "Pattern":    r["pattern"] or "",
                     "Classe":     (r["classe"] or "").upper(),
-                    "Valor":      "" if r["normal"] is None else str(r["normal"]),
-                    "_extra":     r["extra"],  # preservado no save
+                    "Normal":     "" if r["normal"] is None else str(r["normal"]),
+                    "Extra":      "" if r["extra"] is None else str(r["extra"]),
                 })
         except Exception as e:
             print(f"❌ RegrasTableModel.load() erro: {e}")
@@ -392,11 +406,10 @@ class RegrasTableModel(QAbstractTableModel):
             traceback.print_exc()
         self._dirty = False
         self.endResetModel()
-    
 
     def add_row(self):
         new = {"_id": None, "Prioridade": 100, "Classe": "DESPESA",
-               "Conta": "", "Pattern": "", "Valor": ""}
+               "Conta": "", "Pattern": "", "Normal": "", "Extra": ""}
         self.beginInsertRows(QModelIndex(), len(self._rows), len(self._rows))
         self._rows.append(new)
         self.endInsertRows()
@@ -412,9 +425,9 @@ class RegrasTableModel(QAbstractTableModel):
 
     def save(self, pasta: Path) -> tuple[int, int, list[str]]:
         """
-        V5: Persiste o estado do model na tabela regras.
-        Apaga todas as regras gerais (normal IS NULL) e re-insere.
-        As regras de condóminos (normal IS NOT NULL) são preservadas.
+        V5: Substitui TODAS as regras pelo conteúdo da grelha.
+        DELETE completo + re-INSERT — evita duplicados.
+        Preserva normal (coluna Normal) e extra (coluna Extra).
         Devolve (inseridas, n_erros, mensagens_erro).
         """
         erros: list[str] = []
@@ -422,8 +435,7 @@ class RegrasTableModel(QAbstractTableModel):
 
         try:
             with get_connection(pasta) as conn:
-                # Apagar só regras gerais (condóminos ficam intactos)
-                conn.execute("DELETE FROM regras WHERE normal IS NULL")
+                conn.execute("DELETE FROM regras")
 
                 for i, row in enumerate(self._rows):
                     pattern = str(row.get("Pattern", "")).strip()
@@ -440,18 +452,31 @@ class RegrasTableModel(QAbstractTableModel):
                     if classe not in ("RECEITA", "DESPESA"):
                         classe = "DESPESA"
 
-                    valor_str = str(row.get("Valor") or "").strip()
                     normal: float | None = None
-                    if valor_str:
+                    normal_str = str(row.get("Normal") or "").strip()
+                    if normal_str:
                         try:
-                            normal = float(valor_str.replace(",", "."))
+                            normal = float(normal_str.replace(",", "."))
                         except ValueError:
-                            erros.append(f"Linha {i+1} ({conta}): Valor inválido '{valor_str}' — ignorado")
+                            erros.append(
+                                f"Linha {i+1} ({conta}): Normal inválido '{normal_str}' — ignorado"
+                            )
+
+                    extra: float | None = None
+                    extra_str = str(row.get("Extra") or "").strip()
+                    if extra_str:
+                        try:
+                            extra = float(extra_str.replace(",", "."))
+                        except ValueError:
+                            erros.append(
+                                f"Linha {i+1} ({conta}): Extra inválido '{extra_str}' — ignorado"
+                            )
 
                     conn.execute(
-                        """INSERT INTO regras (prioridade, classe, conta, pattern, normal)
-                           VALUES (?, ?, ?, ?, ?)""",
-                        (prio, classe, conta, pattern, normal),
+                        """INSERT INTO regras
+                           (prioridade, classe, conta, pattern, normal, extra, ativo)
+                           VALUES (?, ?, ?, ?, ?, ?, 1)""",
+                        (prio, classe, conta, pattern, normal, extra),
                     )
                     inseridas += 1
 
@@ -583,8 +608,36 @@ class ConfiguracoesWidget(QWidget):
 
     def _setup_tab(self, tab_widget, model, is_configs):
         layout = QVBoxLayout(tab_widget)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        layout.setContentsMargins(0, 8 if is_configs else 0, 0, 0)
+        layout.setSpacing(6 if is_configs else 0)
+
+        # Barra Adicionar / Apagar (igual à aba Regras) — só em Configs
+        if is_configs:
+            btn_bar = QHBoxLayout()
+            btn_bar.setContentsMargins(4, 0, 4, 0)
+
+            btn_add = QPushButton("＋  Adicionar")
+            btn_add.setFixedHeight(34)
+            btn_add.setStyleSheet(
+                "QPushButton{background:#1976D2;color:white;font-weight:bold;"
+                "border:none;border-radius:4px;padding:0 12px;}"
+                "QPushButton:hover{background:#1565C0;}"
+            )
+            btn_add.clicked.connect(self._configs_add_row)
+
+            btn_del = QPushButton("✕  Apagar")
+            btn_del.setFixedHeight(34)
+            btn_del.setStyleSheet(
+                "QPushButton{background:#C62828;color:white;font-weight:bold;"
+                "border:none;border-radius:4px;padding:0 12px;}"
+                "QPushButton:hover{background:#B71C1C;}"
+            )
+            btn_del.clicked.connect(self._configs_del_row)
+
+            btn_bar.addWidget(btn_add)
+            btn_bar.addWidget(btn_del)
+            btn_bar.addStretch()
+            layout.addLayout(btn_bar)
 
         table = QTableView()
         table.setModel(model)
@@ -640,6 +693,12 @@ class ConfiguracoesWidget(QWidget):
     def handle_key_press(self, event, table, model):
         if event.key() == Qt.Key.Key_Insert:
             model.add_row()
+            if model is self.model_configs and hasattr(self, "table_configs"):
+                row = model.rowCount() - 1
+                idx = model.index(row, 0)
+                self.table_configs.setCurrentIndex(idx)
+                self.table_configs.scrollToBottom()
+                self.table_configs.edit(idx)
         elif event.key() == Qt.Key.Key_Delete:
             indexes = table.selectedIndexes()
             if indexes:
@@ -654,6 +713,32 @@ class ConfiguracoesWidget(QWidget):
                     model.remove_row(row)
         else:
             table.keyPressEvent_original(event)
+
+    def _configs_add_row(self):
+        row = self.model_configs.add_row()
+        idx = self.model_configs.index(row, 0)
+        self.table_configs.setCurrentIndex(idx)
+        self.table_configs.scrollToBottom()
+        self.table_configs.edit(idx)
+
+    def _configs_del_row(self):
+        indexes = self.table_configs.selectedIndexes()
+        if not indexes:
+            return
+        row = indexes[0].row()
+        # Mostrar CATEGORIA/CHAVE se existirem
+        try:
+            rec = self.model_configs._data[row]
+            nome = rec.get("CHAVE") or rec.get("CATEGORIA") or f"linha {row+1}"
+        except Exception:
+            nome = f"linha {row+1}"
+        reply = QMessageBox.question(
+            self, "Confirmar",
+            f"Apagar o registo «{nome}»?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.model_configs.remove_row(row)
 
     # ── Aba Regras ─────────────────────────────────────────────────────────────
 
@@ -737,8 +822,10 @@ class ConfiguracoesWidget(QWidget):
         hdr.setSectionResizeMode(_COL_CONTA,  QHeaderView.ResizeMode.Fixed)
         hdr.resizeSection(_COL_CONTA, 200)
         hdr.setSectionResizeMode(_COL_PAT,    QHeaderView.ResizeMode.Stretch)
-        hdr.setSectionResizeMode(_COL_VALOR,  QHeaderView.ResizeMode.Fixed)
-        hdr.resizeSection(_COL_VALOR, 90)
+        hdr.setSectionResizeMode(_COL_NORMAL, QHeaderView.ResizeMode.Fixed)
+        hdr.resizeSection(_COL_NORMAL, 90)
+        hdr.setSectionResizeMode(_COL_EXTRA,  QHeaderView.ResizeMode.Fixed)
+        hdr.resizeSection(_COL_EXTRA, 90)
 
         # Teclas Ins/Del
         self.table_regras.keyPressEvent = self._regras_key_press
@@ -991,7 +1078,20 @@ class ConfiguracoesWidget(QWidget):
                 error_msg
             )
 
+    def recarregar_regras(self):
+        """Recarrega só a grelha de Regras (ex.: após gravar quotas em Condóminos)."""
+        if not hasattr(self, "caminho_configs") or self.caminho_configs is None:
+            return
+        pasta = self.caminho_configs.parent
+        try:
+            self.model_regras.load(pasta)
+            n = self.model_regras.rowCount()
+            self.status_label.setText(f"✅ Regras recarregadas ({n} activas)")
+        except Exception as e:
+            self.status_label.setText(f"⚠️ Regras: {e}")
+
     def set_pasta_dados(self, pasta_dados):
+
         self.pasta_dados = pasta_dados
         self.caminho_configs = BASE_DIR / pasta_dados / "Configs"
         self.carregar_dados()

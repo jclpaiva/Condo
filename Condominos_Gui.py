@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
     QLabel, QApplication, QItemDelegate, QComboBox, QStyledItemDelegate, QMenu, QDialog, QTableWidget,
     QTableWidgetItem, QFrame, QGridLayout, QGraphicsOpacityEffect
 )
-from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QVariant, QSize, QEvent, QPoint, QPropertyAnimation, QSequentialAnimationGroup, QEasingCurve
+from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QVariant, QSize, QEvent, QPoint, QPropertyAnimation, QSequentialAnimationGroup, QEasingCurve, pyqtSignal
 from PyQt6.QtGui import QColor, QBrush, QIcon, QPixmap, QCursor, QPen
 
 from Commons import (
@@ -1098,6 +1098,9 @@ class CondominosTableModel(QAbstractTableModel):
 # WIDGET PRINCIPAL
 # ====================================================================
 class CondominosWidget(QWidget):
+    # Emitido após gravar com sucesso (Main pode ligar a ConfiguracoesWidget.recarregar_regras)
+    quotas_atualizadas = pyqtSignal()
+
     def __init__(self, pasta_dados=None, parent=None):
         super().__init__(parent)
         self.pasta_dados = pasta_dados
@@ -1333,17 +1336,42 @@ class CondominosWidget(QWidget):
             if not self.model.save_to_db(str(self.caminho_condominos_db)):
                 raise Exception("Erro ao guardar alterações.")
             
-            # Atualizar quotas
+            # Sincronizar quotas normal/extra na tabela regras (sem INSERT)
             atualizar_quotas_configs(self.pasta_dados, self.model._data)
-            
-            QMessageBox.information(self, "Sucesso", "Alterações guardadas e quotas atualizadas no Configs!")
+
+            # Refresh visual da aba Regras (se existir no Main)
+            self.quotas_atualizadas.emit()
+            self._tentar_refresh_regras()
+
+            QMessageBox.information(
+                self, "Sucesso",
+                "Alterações guardadas.\n"
+                "Quotas (normal/extra) sincronizadas na tabela regras."
+            )
             self.carregar_tabela()
-            self.status_bar.showMessage("✅ Alterações guardadas e Configs atualizado.")
+            self.status_bar.showMessage("✅ Guardado — quotas sincronizadas em regras.")
         except ValueError as ve:
             QMessageBox.warning(self, "Validação Falhou", str(ve))
         except Exception as e:
             QMessageBox.critical(self, "Erro", str(e))
     
+
+    def _tentar_refresh_regras(self):
+        """Procura ConfiguracoesWidget na árvore de widgets e recarrega Regras."""
+        try:
+            from PyQt6.QtWidgets import QWidget
+            w = self.parent()
+            visited = set()
+            while w is not None and id(w) not in visited:
+                visited.add(id(w))
+                for child in w.findChildren(QWidget):
+                    if hasattr(child, "recarregar_regras") and callable(child.recarregar_regras):
+                        child.recarregar_regras()
+                        return
+                w = w.parent()
+        except Exception as e:
+            print(f"⚠️ refresh regras: {e}")
+
     def imprimir_recibos_lote(self):
         """Gera recibos anuais em lote para todos os condóminos ativos"""
         if not self.pasta_dados:

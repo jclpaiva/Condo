@@ -134,12 +134,17 @@ def validar_condominos(dados):
 
 def atualizar_quotas_configs(pasta_dados, dados_condominos):
     """
-    V5: Actualiza as regras de condóminos na tabela 'regras' com base nos
-    dados editados na GUI de Condóminos (quotas normal/extra).
+    V5: Actualiza APENAS normal/extra nas regras de condómino já existentes.
 
-    Faz upsert por (pattern=NOME_NORMALIZADO, normal IS NOT NULL):
-    - Se já existe uma regra para este condómino → actualiza normal/extra
-    - Se não existe → cria com pattern=nome_normalizado, conta=andar, classe=RECEITA
+    NÃO cria registos novos em `regras` — só o utilizador cria regras
+    (o pattern tem de ser o texto curto que Bancos procura no CSV).
+
+    Critério de match (por ordem):
+      1. conta = "Quota - {ANDAR}"  e  classe = RECEITA
+      2. conta LIKE "%{ANDAR}%"     e  classe = RECEITA  e  normal IS NOT NULL
+      3. pattern começa pelo nome   e  normal IS NOT NULL  (fallback)
+
+    Se não encontrar regra, regista aviso e continua (sem INSERT).
     """
     from Database import get_connection, db_path
     from Commons import remover_acentos
@@ -150,50 +155,95 @@ def atualizar_quotas_configs(pasta_dados, dados_condominos):
         print("⚠️ condominio.db não encontrada — quotas não actualizadas")
         return
 
-    # Mapeamento de ANDAR → conta contabilística (mesmo formato das regras)
     def conta_de_andar(andar: str) -> str:
         return f"Quota - {andar.strip()}" if andar.strip() else "Quota"
+
+    actualizados = 0
+    sem_regra = []
 
     try:
         with get_connection(pasta) as conn:
             for cond in dados_condominos:
                 nome  = str(cond.get("NOME", "")).strip()
+                if nome.startswith("[") and nome.endswith("]"):
+                    continue  # inactivo
+
                 andar = str(cond.get("ANDAR", "")).strip()
                 quota_n = float(cond.get("QUOTAN", 0) or 0)
                 quota_e = float(cond.get("QUOTAE", 0) or 0)
 
-                if not nome or not andar:
+                if not andar:
                     continue
 
-                # Pattern = nome normalizado (sem acentos, maiúsculas)
-                pattern = remover_acentos(nome).upper()
-                conta   = conta_de_andar(andar)
+                conta = conta_de_andar(andar)
+                pattern_nome = remover_acentos(nome).upper() if nome else ""
 
-                # Verificar se já existe regra para este condómino
-                existing = conn.execute(
-                    "SELECT id FROM regras WHERE pattern=? AND normal IS NOT NULL LIMIT 1",
-                    (pattern,)
-                ).fetchone()
+                # 1) Match exacto por conta
+                rows = conn.execute(
+                    """SELECT id, pattern, normal, extra FROM regras
+                       WHERE classe = 'RECEITA' AND conta = ?
+                       ORDER BY id""",
+                    (conta,),
+                ).fetchall()
 
-                if existing:
-                    conn.execute(
-                        "UPDATE regras SET conta=?, normal=?, extra=? WHERE id=?",
-                        (conta, quota_n, quota_e, existing["id"])
+                # 2) Match por conta contendo o andar
+                if not rows:
+                    rows = conn.execute(
+                        """SELECT id, pattern, normal, extra FROM regras
+                           WHERE classe = 'RECEITA'
+                             AND normal IS NOT NULL
+                             AND conta LIKE ?
+                           ORDER BY id""",
+                        (f"%{andar}%",),
+                    ).fetchall()
+
+                # 3) Fallback: pattern começa pelo nome (ou nome começa pelo pattern)
+                if not rows and pattern_nome:
+                    rows = conn.execute(
+                        """SELECT id, pattern, normal, extra FROM regras
+                           WHERE classe = 'RECEITA'
+                             AND normal IS NOT NULL
+                             AND (
+                               UPPER(pattern) = ?
+                               OR UPPER(pattern) LIKE ?
+                               OR ? LIKE UPPER(pattern) || '%'
+                             )
+                           ORDER BY id""",
+                        (pattern_nome, pattern_nome + "%", pattern_nome),
+                    ).fetchall()
+
+                if not rows:
+                    sem_regra.append(f"{nome or '?'} / {andar}")
+                    print(
+                        f"  ⚠ Sem regra em `regras` para {nome!r} "
+                        f"(conta={conta!r}) — quota NÃO actualizada "
+                        f"(crie a regra manualmente na aba Regras)"
                     )
-                else:
-                    # Calcular prioridade: condóminos têm 10-60 (antes das regras gerais)
-                    n_cond = conn.execute(
-                        "SELECT COUNT(*) FROM regras WHERE normal IS NOT NULL"
-                    ).fetchone()[0]
-                    prio = (n_cond + 1) * 10
+                    continue
+
+                # Actualizar TODAS as regras encontradas (evita ficar com
+                # duplicados com valores antigos)
+                for r in rows:
                     conn.execute(
-                        """INSERT INTO regras (prioridade, classe, conta, pattern, normal, extra)
-                           VALUES (?,'RECEITA',?,?,?,?)""",
-                        (prio, conta, pattern, quota_n, quota_e)
+                        """UPDATE regras
+                           SET normal = ?, extra = ?, ativo = 1
+                           WHERE id = ?""",
+                        (quota_n, quota_e, r["id"]),
                     )
-        print(f"  ✓ Quotas actualizadas na tabela regras ({len(dados_condominos)} condóminos)")
+                    print(
+                        f"  ✓ regra id={r['id']}  {r['pattern']!r}  "
+                        f"normal {r['normal']}→{quota_n}  "
+                        f"extra {r['extra']}→{quota_e}"
+                    )
+                    actualizados += 1
+
+        print(f"  ✓ Quotas sincronizadas em regras: {actualizados} linha(s) actualizada(s)")
+        if sem_regra:
+            print(f"  ⚠ Sem regra correspondente: {', '.join(sem_regra)}")
     except Exception as exc:
         print(f"⚠️ Erro ao actualizar quotas em regras: {exc}")
+        import traceback
+        traceback.print_exc()
 
 
 # ====================================================================
