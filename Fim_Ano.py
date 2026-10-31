@@ -12,47 +12,207 @@ from pathlib import Path
 from datetime import datetime
 from Commons import (
     BASE_DIR,
-    # ✅ CORRIGIDO
+    PASTA_CORRENTE,
+    PASTA_HISTORICO,
     obter_ano_exercicio,
 )
 
 from Logging_utils import ativar_logging
-from Database import carregar_db, salvar_db, existe_dados
+from Database import (
+    existe_dados,
+    resolver_pasta,
+    guardar_movimentos_fonte,
+    carregar_movimentos_fonte,
+    fonte_de_path,
+    save_despesas_wide,
+    save_juros_wide,
+    save_receitas_wide,
+    save_saldos_wide,
+    save_balanco_wide,
+    load_despesas_wide,
+    load_juros_wide,
+    load_receitas_wide,
+    load_saldos_wide,
+    load_balanco_wide,
+    configs as configs_repo,
+    create_schema,
+    db_transaction,
+)
 
-logger = ativar_logging("Fim_Ano")
+logger = ativar_logging("fim_ano")
+# ativar_logging já redirecciona stdout/stderr para o ficheiro de log.
 
-class PrintToLogger:
-    def write(self, msg):
-        msg = msg.rstrip()
-        if msg:
-            logger.info(msg)
+# PASTA_CORRENTE / PASTA_HISTORICO: importadas de Commons (não redefinir
+# aqui — eram uma cópia local não usada, dessincronizável de Commons.py).
 
-    def flush(self):
-        pass
+# ---------------------------------------------------------------------------
+# Identificação canónica de contas / registos de saldo
+# ---------------------------------------------------------------------------
+CONTA_SALDO_ANTERIOR = "SALDO ANTERIOR"
+CONTA_SALDO_DPRAZO   = "SALDO Dep.Poupança"
+DESCRICAO_MARCADOR   = "***"
+TIPO_RECEITA         = "RECEITA"
 
-sys.stdout = PrintToLogger()
-sys.stderr = PrintToLogger()
+_TOKEN_POUPANCA = ("POUPANCA", "POUPANÇA")
+_TOKEN_ORDEM    = ("ORDEM",)
+_TOKEN_CAIXA    = ("CAIXA", "NUMERARIO", "NUMERÁRIO")
+_TOKEN_FINAL    = ("_F", " F", "FINAL")
+_TOKEN_INICIAL  = ("_I", " I", "INICIAL")
 
-PASTA_CORRENTE = BASE_DIR / "corrente"
-PASTA_HISTORICO = BASE_DIR / "historico"
+
+def _norm(s: str) -> str:
+    """Normaliza texto para comparação: uppercase, remove acentos, colapsa espaços."""
+    if s is None:
+        return ""
+    t = str(s).upper().strip()
+    t = (t.replace("Ç", "C").replace("Ã", "A").replace("Õ", "O")
+           .replace("Á", "A").replace("À", "A").replace("Â", "A")
+           .replace("É", "E").replace("Ê", "E")
+           .replace("Í", "I")
+           .replace("Ó", "O").replace("Ô", "O")
+           .replace("Ú", "U"))
+    return " ".join(t.split())
+
+
+def _e_saldo_inicial(conta: str, tipo: str) -> bool:
+    n = _norm(conta)
+    if tipo == "poupanca":
+        return any(t in n for t in _TOKEN_POUPANCA) and any(t in n for t in _TOKEN_INICIAL)
+    if tipo == "ordem":
+        return any(t in n for t in _TOKEN_ORDEM) and any(t in n for t in _TOKEN_INICIAL)
+    if tipo == "caixa":
+        return any(t in n for t in _TOKEN_CAIXA) and any(t in n for t in _TOKEN_INICIAL)
+    return False
+
+
+def _e_saldo_final(conta: str, tipo: str) -> bool:
+    n = _norm(conta)
+    if tipo == "poupanca":
+        return any(t in n for t in _TOKEN_POUPANCA) and any(t in n for t in _TOKEN_FINAL)
+    if tipo == "ordem":
+        return any(t in n for t in _TOKEN_ORDEM) and any(t in n for t in _TOKEN_FINAL)
+    if tipo == "caixa":
+        return any(t in n for t in _TOKEN_CAIXA) and any(t in n for t in _TOKEN_FINAL)
+    return False
+
+
+def _e_conta_a_zerar(conta: str) -> bool:
+    n = _norm(conta)
+    if any(t in n for t in _TOKEN_FINAL) and (
+        any(t in n for t in _TOKEN_POUPANCA)
+        or any(t in n for t in _TOKEN_ORDEM)
+        or any(t in n for t in _TOKEN_CAIXA)
+    ):
+        return True
+    if n in ("JUROS", "SALDO FINAL") or "SALDO EXERCICIO" in n:
+        return True
+    return False
+
+
+def _e_linha_balanco_inicial(conta: str, tipo: str) -> bool:
+    n = _norm(conta)
+    if tipo == "poupanca":
+        return "A)" in n and any(t in n for t in _TOKEN_POUPANCA)
+    if tipo == "ordem":
+        return "B)" in n and any(t in n for t in _TOKEN_ORDEM)
+    if tipo == "caixa":
+        return "C)" in n and any(t in n for t in _TOKEN_CAIXA)
+    return False
+
+
+def _encontrar_idx_saldo_anterior(df: pd.DataFrame):
+    """Localiza o registo canónico de saldo de abertura numa tabela de movimentos."""
+    if df is None or df.empty:
+        return None
+    conta = df["CONTA"].astype(str).map(_norm) if "CONTA" in df.columns else pd.Series([""] * len(df))
+    desc  = df["DESCRICAO"].astype(str) if "DESCRICAO" in df.columns else pd.Series([""] * len(df))
+    tipo  = df["TIPO"].astype(str).str.upper().str.strip() if "TIPO" in df.columns else pd.Series([""] * len(df))
+    marcador = desc.str.contains(r"\*{3}", na=False, regex=True)
+    receita  = tipo == TIPO_RECEITA
+    mask1 = (
+        (conta.str.contains("SALDO ANTERIOR", na=False) | conta.str.contains("SALDO DEP", na=False))
+        & marcador & receita
+    )
+    idxs = df.index[mask1]
+    if len(idxs) > 0:
+        return int(idxs[0])
+    mask2 = conta.str.startswith("SALDO") & marcador & receita
+    idxs = df.index[mask2]
+    if len(idxs) > 0:
+        return int(idxs[0])
+    return None
+
 
 def clean_numeric(value):
     """Retorna 0.0 se o valor for NaN ou None."""
     return 0.0 if pd.isna(value) else float(value)
 
 def ler_db(path):
+    """Lê tabela via API canónica (load_*_wide / movimentos)."""
     try:
-        rows, _ = carregar_db(path)
-        return pd.DataFrame(rows, dtype=object)
+        pasta = resolver_pasta(path)
+        nome = Path(path).name.casefold().replace("ç", "c").replace("ã", "a")
+        if nome == "despesas":
+            rows, _ = load_despesas_wide(pasta)
+            return pd.DataFrame(rows, dtype=object) if rows else pd.DataFrame()
+        if nome == "juros":
+            rows, _ = load_juros_wide(pasta)
+            return pd.DataFrame(rows, dtype=object) if rows else pd.DataFrame()
+        if nome == "receitasn":
+            rows, _ = load_receitas_wide("NORMAL", pasta)
+            return pd.DataFrame(rows, dtype=object) if rows else pd.DataFrame()
+        if nome == "receitase":
+            rows, _ = load_receitas_wide("EXTRA", pasta)
+            return pd.DataFrame(rows, dtype=object) if rows else pd.DataFrame()
+        if nome.startswith("saldo"):
+            rows, _ = load_saldos_wide(pasta)
+            return pd.DataFrame(rows, dtype=object) if rows else pd.DataFrame()
+        if nome == "balanco":
+            rows, _ = load_balanco_wide(pasta)
+            return pd.DataFrame(rows, dtype=object) if rows else pd.DataFrame()
+        if nome in ("bancos", "caixa", "dprazo"):
+            rows = carregar_movimentos_fonte(pasta, nome)
+            return pd.DataFrame(rows, dtype=object) if rows else pd.DataFrame()
+        print(f"⚠️ ler_db: tabela desconhecida {nome!r}")
+        return pd.DataFrame()
     except Exception:
         return None
-        
-def salvar_db(df, path, field_specs):
+
+def gravar_tabela(df, path=None, conn=None, ano=None):
+    """Escrita via API canónica (movimentos / wide).
+    Se `conn` for fornecido, todas as escritas usam essa conexão.
+    `ano`: só é relevante para ReceitasN/ReceitasE (ver fim_ano_quotas_normais/extras);
+    permite gravar o SALDO_ANT/SALDO já sob o ano novo, antes de o
+    ANO_EXERCICIO em Configs ter sido atualizado.
     """
-    Delegação explícita para o bridge central de compatibilidade.
-    Mantém a API local do módulo; a escrita vai para condominio.db.
-    """
-    return salvar_db_compat(df, path, field_specs)
+    pasta = resolver_pasta(path)
+    nome = Path(path).name.casefold().replace("ç", "c").replace("ã", "a")
+    try:
+        if nome in ("bancos", "caixa", "dprazo"):
+            return guardar_movimentos_fonte(df, pasta=pasta, fonte=nome, conn=conn)
+        if nome == "despesas":
+            save_despesas_wide(df, pasta, ano=ano, conn=conn)
+            return True
+        if nome == "juros":
+            save_juros_wide(df, pasta, ano=ano, conn=conn)
+            return True
+        if nome == "receitasn":
+            save_receitas_wide(df, "NORMAL", pasta, ano=ano, conn=conn)
+            return True
+        if nome == "receitase":
+            save_receitas_wide(df, "EXTRA", pasta, ano=ano, conn=conn)
+            return True
+        if nome.startswith("saldo"):
+            save_saldos_wide(df, pasta, conn=conn)
+            return True
+        if nome == "balanco":
+            save_balanco_wide(df, pasta, conn=conn)
+            return True
+        print(f"⚠️ gravar_tabela: tabela desconhecida {nome!r}")
+        return False
+    except Exception as exc:
+        print(f"⚠️ gravar_tabela({nome}): {exc}")
+        return False
 
 # obter_ano_exercicio já não é redefinida aqui: usa-se directamente a versão
 # central de Commons.py (importada acima), para deixar de haver duas
@@ -119,7 +279,7 @@ def obter_saldos_finais(saldos_db='Saldos'):
         print(f"\n=== OBTER_SALDOS_FINAIS ===")
         print(f"Lendo ficheiro: {saldos_db}")
         
-        rows, _ = carregar_db(saldos_db)
+        rows, _ = load_saldos_wide(resolver_pasta(saldos_db))
         df = pd.DataFrame(rows, dtype=object)
         print(f"Registos lidos: {len(df)}")
         
@@ -132,24 +292,20 @@ def obter_saldos_finais(saldos_db='Saldos'):
         for idx, row in df.iterrows():
             print(f"  {row['CONTA']}: {row['VALOR']}")
         
-        def obter_valor(*patterns):
-            """Procura CONTA que contenha algum dos padrões (case-insensitive)."""
-            conta_up = df['CONTA'].astype(str).str.upper()
-            for pattern in patterns:
-                pat = pattern.upper()
-                mascara = conta_up.str.contains(pat, na=False, regex=False)
-                if mascara.any():
-                    valor = clean_numeric(df[mascara].iloc[0]['VALOR'])
-                    print(f"  Padrão '{pattern}' encontrado em '{df[mascara].iloc[0]['CONTA']}': {valor}")
+        def _valor_saldo_final(tipo: str) -> float:
+            for _, row in df.iterrows():
+                conta = str(row.get("CONTA", ""))
+                if _e_saldo_final(conta, tipo):
+                    valor = clean_numeric(row.get("VALOR"))
+                    print(f"  ✓ {tipo}: '{conta}' = {valor}")
                     return valor
-            print(f"  Padrões {patterns} NÃO encontrados")
+            print(f"  ⚠️ {tipo}: nenhum registo de saldo final encontrado")
             return 0.0
 
-        print("\nBuscando saldos finais:")
-        # Nomes reais: "Depósito Poupança_F", "Depósito Ordem_F", "Numerário Caixa_F"
-        poupanca_f = obter_valor('POUPANÇA_F', 'POUPANCA_F', 'POUPANÇA F', 'POUPANCA F')
-        ordem_f = obter_valor('ORDEM_F', 'ORDEM F', 'DEPÓSITO ORDEM_F', 'DEPOSITO ORDEM_F')
-        caixa_f = obter_valor('CAIXA_F', 'CAIXA F', 'NUMERÁRIO CAIXA_F', 'NUMERARIO CAIXA_F')
+        print("\nBuscando saldos finais (identificação canónica):")
+        poupanca_f = _valor_saldo_final("poupanca")
+        ordem_f    = _valor_saldo_final("ordem")
+        caixa_f    = _valor_saldo_final("caixa")
         
         resultado = {
             'poupanca_f': poupanca_f, 
@@ -172,11 +328,14 @@ def obter_saldos_finais(saldos_db='Saldos'):
         traceback.print_exc()
         return {'poupanca_f': 0.0, 'ordem_f': 0.0, 'caixa_f': 0.0, 'total': 0.0}
 
-def zerar_saldos(saldos_db='Saldos', poupanca_novo=0.0, ordem_novo=0.0, caixa_novo=0.0):
+def zerar_saldos(saldos_db='Saldos', poupanca_novo=0.0, ordem_novo=0.0, caixa_novo=0.0,
+                  df_saldos=None, df_balanco=None, conn=None):
     """
     Atualiza saldos iniciais com os valores fornecidos e zera os saldos finais.
-    Usa o bridge de compatibilidade do projeto: tenta SQLite sempre que o
-    base de dados condominio.db existe na pasta de trabalho.
+    Se `conn` for fornecido, todas as escritas usam essa conexão (transação externa).
+    `df_saldos`/`df_balanco`: DataFrames já lidos antecipadamente (ver nota de
+    performance em `fim_ano_e_transfere_saldo`); se omitidos, são lidos aqui
+    (comportamento antigo, para chamadas fora dessa função).
     """
     print(f"\n=== ZERAR_SALDOS ===")
     print(f"Ficheiro: {saldos_db}")
@@ -187,35 +346,30 @@ def zerar_saldos(saldos_db='Saldos', poupanca_novo=0.0, ordem_novo=0.0, caixa_no
 
     # 1) Atualiza Saldos via dataframe com fallback comum
     try:
-        df = ler_db(saldos_db)
+        df = ler_db(saldos_db) if df_saldos is None else df_saldos
         if df is None or df.empty:
             print(f"⚠️ Saldos vazio ou não legível: {saldos_db}")
             return False
 
-        print(f"\nAtualizando Saldos...")
+        print(f"\nAtualizando Saldos (identificação canónica)...")
         for idx, row in df.iterrows():
-            conta = str(row.get('CONTA', '')).strip().upper()
-            if 'POUPANCA_I' in conta or 'POUPANÇA_I' in conta:
-                print(f"  ✓ Atualizando {conta}: {poupanca_novo:.2f}")
+            conta = str(row.get('CONTA', ''))
+            if _e_saldo_inicial(conta, "poupanca"):
+                print(f"  ✓ Atualizando inicial poupança '{conta}': {poupanca_novo:.2f}")
                 df.at[idx, 'VALOR'] = round(poupanca_novo, 2)
-            elif 'ORDEM_I' in conta:
-                print(f"  ✓ Atualizando {conta}: {ordem_novo:.2f}")
+            elif _e_saldo_inicial(conta, "ordem"):
+                print(f"  ✓ Atualizando inicial ordem '{conta}': {ordem_novo:.2f}")
                 df.at[idx, 'VALOR'] = round(ordem_novo, 2)
-            elif 'CAIXA_I' in conta or 'NUMERARIO_I' in conta:
-                print(f"  ✓ Atualizando {conta}: {caixa_novo:.2f}")
+            elif _e_saldo_inicial(conta, "caixa"):
+                print(f"  ✓ Atualizando inicial caixa '{conta}': {caixa_novo:.2f}")
                 df.at[idx, 'VALOR'] = round(caixa_novo, 2)
 
-            if 'POUPANCA_F' in conta or 'POUPANÇA_F' in conta or 'ORDEM_F' in conta or 'CAIXA_F' in conta:
-                print(f"  ✓ Zerando {conta}")
+            if _e_conta_a_zerar(conta):
+                print(f"  ✓ Zerando '{conta}'")
                 df.at[idx, 'VALOR'] = 0.0
 
-            if conta == 'JUROS' or 'SALDO EXERCICIO' in conta or 'SALDO EXERCÍCIO' in conta or conta == 'SALDO FINAL':
-                print(f"  ✓ Zerando {conta}")
-                df.at[idx, 'VALOR'] = 0.0
-
-        specs = 'CONTA C(50);DESCRICAO C(50);TIPO C(10);VALOR N(10,2);SALDO N(10,2);OBSERVACAO C(30)'
-        if not salvar_db(df, saldos_db, specs):
-            raise RuntimeError('salvar_db falhou para Saldos')
+        if not gravar_tabela(df, saldos_db, conn=conn):
+            raise RuntimeError('gravar_tabela falhou para Saldos')
 
         print(f"✅ Saldos atualizado com sucesso!")
     except Exception as e:
@@ -224,7 +378,7 @@ def zerar_saldos(saldos_db='Saldos', poupanca_novo=0.0, ordem_novo=0.0, caixa_no
         traceback.print_exc()
         return False
 
-    # 2) Atualiza Balanco com o mesmo bridge
+    # 2) Atualiza Balanco
     try:
         balanco_path = Path(saldos_db).parent / 'Balanco'
         print(f"\nAtualizando Balanco em: {balanco_path}")
@@ -233,7 +387,7 @@ def zerar_saldos(saldos_db='Saldos', poupanca_novo=0.0, ordem_novo=0.0, caixa_no
             print(f"  ⚠️ Balanco não encontrado, a saltar atualização")
             return True
 
-        df_bal = ler_db(str(balanco_path))
+        df_bal = ler_db(str(balanco_path)) if df_balanco is None else df_balanco
         if df_bal is None or df_bal.empty:
             print(f"  ⚠️ Balanco vazio, a saltar atualização")
             return True
@@ -243,22 +397,21 @@ def zerar_saldos(saldos_db='Saldos', poupanca_novo=0.0, ordem_novo=0.0, caixa_no
             if 'VALOR' in df_bal.columns:
                 df_bal.at[idx, 'VALOR'] = 0.0
 
-        # atualiza os saldos iniciais
+        # atualiza os saldos iniciais (identificação canónica A/B/C)
         for idx, row in df_bal.iterrows():
-            conta = str(row.get('CONTA', '')).strip().upper().replace('Ç','C').replace('Ã','A')
-            if 'A)' in conta and 'POUPAN' in conta:
-                print(f"  ✓ Atualizando {row.get('CONTA')}: {poupanca_novo:.2f}")
+            conta = str(row.get('CONTA', ''))
+            if _e_linha_balanco_inicial(conta, "poupanca"):
+                print(f"  ✓ Atualizando {conta}: {poupanca_novo:.2f}")
                 df_bal.at[idx, 'VALOR'] = round(poupanca_novo, 2)
-            elif 'B)' in conta and 'ORDEM' in conta:
-                print(f"  ✓ Atualizando {row.get('CONTA')}: {ordem_novo:.2f}")
+            elif _e_linha_balanco_inicial(conta, "ordem"):
+                print(f"  ✓ Atualizando {conta}: {ordem_novo:.2f}")
                 df_bal.at[idx, 'VALOR'] = round(ordem_novo, 2)
-            elif 'C)' in conta and ('CAIXA' in conta or 'NUMERARIO' in conta):
-                print(f"  ✓ Atualizando {row.get('CONTA')}: {caixa_novo:.2f}")
+            elif _e_linha_balanco_inicial(conta, "caixa"):
+                print(f"  ✓ Atualizando {conta}: {caixa_novo:.2f}")
                 df_bal.at[idx, 'VALOR'] = round(caixa_novo, 2)
 
-        specs_bal = 'CONTA C(50);DESCRICAO C(50);TIPO C(10);VALOR N(10,2);SALDO N(10,2);OBSERVACAO C(30)'
-        if not salvar_db(df_bal, str(balanco_path), specs_bal):
-            raise RuntimeError('salvar_db falhou para Balanco')
+        if not gravar_tabela(df_bal, str(balanco_path), conn=conn):
+            raise RuntimeError('gravar_tabela falhou para Balanco')
 
         print(f"✅ Balanco atualizado com sucesso!")
     except Exception as e:
@@ -268,62 +421,52 @@ def zerar_saldos(saldos_db='Saldos', poupanca_novo=0.0, ordem_novo=0.0, caixa_no
 
     return True
 
-def fim_ano_juros(juros_db='Juros'):
-    df = ler_db(juros_db)
+def fim_ano_juros(juros_db='Juros', ano=None, df=None, conn=None):
+    """Zera juros mensais e grava sob o ano novo.
+
+    `ano`: ano do exercício seguinte (obrigatório no encerramento). Sem isto,
+    save_juros_wide usaria ANO_EXERCICIO ainda antigo e destruía os dados do
+    ano que acabámos de arquivar, deixando o ano novo sem linhas.
+    `df`: DataFrame já lido antecipadamente; se omitido, é lido aqui.
+    """
+    df = ler_db(juros_db) if df is None else df
     if df is None or df.empty:
         return True  # já vazio — nada a limpar
-    
+
     meses = ['JAN','FEV','MAR','ABR','MAI','JUN','JUL','AGO','SET','OUT','NOV','DEZ']
     for mes in meses:
         if mes in df.columns:
             df[mes] = 0.0
-    
+
     if 'TOTAL' in df.columns:
         df['TOTAL'] = 0.0
-    
-    specs = 'JUROS C(50);JAN N(10,2);FEV N(10,2);MAR N(10,2);ABR N(10,2);MAI N(10,2);JUN N(10,2);JUL N(10,2);AGO N(10,2);SET N(10,2);OUT N(10,2);NOV N(10,2);DEZ N(10,2);TOTAL N(10,2)'
-    return salvar_db(df, juros_db, specs)
+    return gravar_tabela(df, juros_db, conn=conn, ano=ano)
 
-def fim_ano_despesas(despesas_db='Despesas'):
-    df = ler_db(despesas_db)
+def fim_ano_despesas(despesas_db='Despesas', ano=None, df=None, conn=None):
+    """Zera despesas mensais e grava sob o ano novo.
+
+    `ano`: ano do exercício seguinte (ver nota em `fim_ano_juros`).
+    `df`: DataFrame já lido antecipadamente; se omitido, é lido aqui.
+    """
+    df = ler_db(despesas_db) if df is None else df
     if df is None or df.empty:
         return True  # já vazio — nada a limpar
-    
+
     meses = ['JAN','FEV','MAR','ABR','MAI','JUN','JUL','AGO','SET','OUT','NOV','DEZ']
     for mes in meses:
         if mes in df.columns:
             df[mes] = 0.0
-    
+
     if 'TOTAL' in df.columns:
         df['TOTAL'] = 0.0
-    
-    specs = 'DESPESAS C(50);JAN N(10,2);FEV N(10,2);MAR N(10,2);ABR N(10,2);MAI N(10,2);JUN N(10,2);JUL N(10,2);AGO N(10,2);SET N(10,2);OUT N(10,2);NOV N(10,2);DEZ N(10,2);TOTAL N(10,2)'
-    return salvar_db(df, despesas_db, specs)
+    return gravar_tabela(df, despesas_db, conn=conn, ano=ano)
 
-def fim_ano_quotas_normais(receitas_n_db='ReceitasN'):
-    df = ler_db(receitas_n_db)
-    if df is None or df.empty:
-        return True  # já vazio — nada a limpar
-    
-    if 'SALDO' in df.columns:
-        df['SALDO_ANT'] = df['SALDO'].copy()
-    
-    meses = ['JAN','FEV','MAR','ABR','MAI','JUN','JUL','AGO','SET','OUT','NOV','DEZ']
-    for mes in meses:
-        if mes in df.columns:
-            df[mes] = 0.0
-    
-    if 'TOTAL' in df.columns:
-        df['TOTAL'] = 0.0
-    
-    if 'SALDO' in df.columns:
-        df['SALDO'] = df['SALDO_ANT'].copy()
-    
-    specs = 'FRACCAO C(30);SALDO_ANT N(10,2);JAN N(10,2);FEV N(10,2);MAR N(10,2);ABR N(10,2);MAI N(10,2);JUN N(10,2);JUL N(10,2);AGO N(10,2);SET N(10,2);OUT N(10,2);NOV N(10,2);DEZ N(10,2);TOTAL N(10,2);SALDO N(10,2)'
-    return salvar_db(df, receitas_n_db, specs)
-
-def fim_ano_quotas_extras(receitas_e_db='ReceitasE'):
-    df = ler_db(receitas_e_db)
+def fim_ano_quotas_normais(receitas_n_db='ReceitasN', ano=None, df=None, conn=None):
+    """`ano`: ano novo (ano_atual + 1) a usar ao gravar o SALDO_ANT/SALDO
+    transitados — ver nota em `gravar_tabela`/`fim_ano_e_transfere_saldo`.
+    `df`: DataFrame já lido antecipadamente; se omitido, é lido aqui.
+    """
+    df = ler_db(receitas_n_db) if df is None else df
     if df is None or df.empty:
         return True  # já vazio — nada a limpar
     
@@ -339,13 +482,36 @@ def fim_ano_quotas_extras(receitas_e_db='ReceitasE'):
         df['TOTAL'] = 0.0
     
     if 'SALDO' in df.columns:
-        df['SALDO'] = df['SALDO_ANT'].copy()
-    
-    specs = 'FRACCAO C(30);SALDO_ANT N(10,2);JAN N(10,2);FEV N(10,2);MAR N(10,2);ABR N(10,2);MAI N(10,2);JUN N(10,2);JUL N(10,2);AGO N(10,2);SET N(10,2);OUT N(10,2);NOV N(10,2);DEZ N(10,2);TOTAL N(10,2);SALDO N(10,2)'
-    return salvar_db(df, receitas_e_db, specs)
+        df['SALDO'] = 0.0        # Zerar saldos p/ novo ano. Corrigido -> df['SALDO_ANT'].copy()
+    return gravar_tabela(df, receitas_n_db, conn=conn, ano=ano)
 
-def transfere_saldo_bancos(bancos_db='Bancos', saldo_final=0.0):
-    df = ler_db(bancos_db)
+def fim_ano_quotas_extras(receitas_e_db='ReceitasE', ano=None, df=None, conn=None):
+    """`ano`: ano novo (ano_atual + 1) a usar ao gravar o SALDO_ANT/SALDO
+    transitados — ver nota em `gravar_tabela`/`fim_ano_e_transfere_saldo`.
+    `df`: DataFrame já lido antecipadamente; se omitido, é lido aqui.
+    """
+    df = ler_db(receitas_e_db) if df is None else df
+    if df is None or df.empty:
+        return True  # já vazio — nada a limpar
+    
+    if 'SALDO' in df.columns:
+        df['SALDO_ANT'] = df['SALDO'].copy()
+    
+    meses = ['JAN','FEV','MAR','ABR','MAI','JUN','JUL','AGO','SET','OUT','NOV','DEZ']
+    for mes in meses:
+        if mes in df.columns:
+            df[mes] = 0.0
+    
+    if 'TOTAL' in df.columns:
+        df['TOTAL'] = 0.0
+    
+    if 'SALDO' in df.columns:
+        df['SALDO'] = 0.0        # Zerar saldos p/ novo ano. Corrigido -> df['SALDO_ANT'].copy()
+    return gravar_tabela(df, receitas_e_db, conn=conn, ano=ano)
+
+def transfere_saldo_bancos(bancos_db='Bancos', saldo_final=0.0, df=None, conn=None):
+    """`df`: DataFrame já lido antecipadamente; se omitido, é lido aqui."""
+    df = ler_db(bancos_db) if df is None else df
     if df is None or df.empty:
         return False
     
@@ -362,41 +528,39 @@ def transfere_saldo_bancos(bancos_db='Bancos', saldo_final=0.0):
     
     df = df.dropna(how='all').reset_index(drop=True)
     
-    idx_saldo = df[(df['CONTA'].str.upper().str.contains('SALDO ANTERIOR',na=False))&
-                   (df['DESCRICAO'].str.contains(r'\*{3}',na=False))&
-                   (df['TIPO'].str.upper()=='RECEITA')].index
-    
-    if not idx_saldo.empty:
-        idx = idx_saldo[0]
-    else:
+    idx = _encontrar_idx_saldo_anterior(df)
+    if idx is None:
         new_row = pd.DataFrame({
-            'DATA':[data_ano_seguinte],
-            'CONTA':['SALDO ANTERIOR'],
-            'DESCRICAO':['***'],
-            'TIPO':['RECEITA'],
-            'VALOR':[0.0],
-            'SALDO':[saldo_final],
-            'OBSERVACAO':['']
+            'DATA': [data_ano_seguinte],
+            'CONTA': [CONTA_SALDO_ANTERIOR],
+            'DESCRICAO': [DESCRICAO_MARCADOR],
+            'TIPO': [TIPO_RECEITA],
+            'VALOR': [0.0],
+            'SALDO': [saldo_final],
+            'OBSERVACAO': ['']
         }, index=[0])
         df = pd.concat([new_row, df.iloc[0:]]).reset_index(drop=True)
         idx = 0
     
-    df.at[idx,'SALDO'] = saldo_final
-    df.at[idx,'VALOR'] = 0.0
-    df.at[idx,'DATA'] = data_ano_seguinte  # Atualizar também se já existir
-    df = df.iloc[:idx+1]
+    df.at[idx, 'SALDO'] = saldo_final
+    df.at[idx, 'VALOR'] = 0.0
+    df.at[idx, 'DATA'] = data_ano_seguinte
+    df.at[idx, 'CONTA'] = CONTA_SALDO_ANTERIOR
+    df.at[idx, 'DESCRICAO'] = DESCRICAO_MARCADOR
+    df.at[idx, 'TIPO'] = TIPO_RECEITA
+    df = df.iloc[:idx + 1]
     
     try:
-        specs = 'DATA D;TIPO C(10);CONTA C(30);DESCRICAO C(30);VALOR N(10,2);SALDO N(10,2);OBSERVACAO C(32)'
-        return salvar_db(df, bancos_db, specs)
+        return gravar_tabela(df, bancos_db, conn=conn)
     except Exception as e:
         print(f"  ❌ Erro ao transferir saldo Bancos: {e}")
         import traceback
         traceback.print_exc()
         return False
 
-def transfere_saldo_caixa(caixa_db='Caixa', saldo_final=0.0):
-    df = ler_db(caixa_db)
+def transfere_saldo_caixa(caixa_db='Caixa', saldo_final=0.0, df=None, conn=None):
+    """`df`: DataFrame já lido antecipadamente; se omitido, é lido aqui."""
+    df = ler_db(caixa_db) if df is None else df
     if df is None or df.empty:
         return False
     
@@ -415,37 +579,35 @@ def transfere_saldo_caixa(caixa_db='Caixa', saldo_final=0.0):
     
     df = df.dropna(how='all').reset_index(drop=True)
     
-    idx_saldo = df[(df['CONTA'].str.upper().str.contains('SALDO ANTERIOR',na=False))&
-                   (df['DESCRICAO'].str.contains(r'\*{3}',na=False))&
-                   (df['TIPO'].str.upper()=='RECEITA')].index
-    
-    if not idx_saldo.empty:
-        idx = idx_saldo[0]
-    else:
+    idx = _encontrar_idx_saldo_anterior(df)
+    if idx is None:
         new_row = pd.DataFrame({
-            'DATA':[data_ano_seguinte],
-            'CONTA':['SALDO ANTERIOR'],
-            'DESCRICAO':['***'],
-            'TIPO':['RECEITA'],
-            'VALOR':[0.0],
-            'SALDO':[saldo_final],
-            'OBSERVACAO':['']
+            'DATA': [data_ano_seguinte],
+            'CONTA': [CONTA_SALDO_ANTERIOR],
+            'DESCRICAO': [DESCRICAO_MARCADOR],
+            'TIPO': [TIPO_RECEITA],
+            'VALOR': [0.0],
+            'SALDO': [saldo_final],
+            'OBSERVACAO': ['']
         }, index=[0])
         df = pd.concat([new_row, df.iloc[0:]]).reset_index(drop=True)
         idx = 0
     
-    df.at[idx,'SALDO'] = saldo_final
-    df.at[idx,'VALOR'] = 0.0
-    df.at[idx,'DATA'] = data_ano_seguinte  # Atualizar também se já existir
-    df = df.iloc[:idx+1]
+    df.at[idx, 'SALDO'] = saldo_final
+    df.at[idx, 'VALOR'] = 0.0
+    df.at[idx, 'DATA'] = data_ano_seguinte
+    df.at[idx, 'CONTA'] = CONTA_SALDO_ANTERIOR
+    df.at[idx, 'DESCRICAO'] = DESCRICAO_MARCADOR
+    df.at[idx, 'TIPO'] = TIPO_RECEITA
+    df = df.iloc[:idx + 1]
     
     try:
-        specs = 'DATA D;TIPO C(10);CONTA C(30);DESCRICAO C(30);VALOR N(10,2);SALDO N(10,2);OBSERVACAO C(30)'
-        return salvar_db(df, caixa_db, specs)
-    except:
+        return gravar_tabela(df, caixa_db, conn=conn)
+    except Exception:
         return False
 
-def transfere_saldo_dprazo(dprazo_db='DPrazo', saldo_final=0.0):
+def transfere_saldo_dprazo(dprazo_db='DPrazo', saldo_final=0.0, df=None, conn=None):
+    """`df`: DataFrame já lido antecipadamente; se omitido, é lido aqui."""
     # Obter ano do exercício e calcular data do ano seguinte (1 de janeiro)
     bancos_path = str(Path(dprazo_db).parent / 'Bancos')
     ano_exercicio = obter_ano_exercicio(bancos_path)
@@ -454,65 +616,63 @@ def transfere_saldo_dprazo(dprazo_db='DPrazo', saldo_final=0.0):
     print(f"  Ano exercício: {ano_exercicio}")
     print(f"  Data SALDO Dep.Poupança: {data_ano_seguinte.strftime('%d-%m-%Y')}")
     
-    df = ler_db(dprazo_db)
+    df = (ler_db(dprazo_db) if df is None else df)
     
-    # ✅ CORRIGIDO: Se ficheiro vazio ou None, criar DataFrame novo com registo inicial
     if df is None or df.empty:
         print(f"  ⚠️ DPrazo vazio, criando registo inicial...")
         df = pd.DataFrame({
             'DATA': [data_ano_seguinte],
-            'CONTA': ['SALDO Dep.Poupança'],
-            'DESCRICAO': ['***'],
-            'TIPO': ['RECEITA'],
+            'CONTA': [CONTA_SALDO_DPRAZO],
+            'DESCRICAO': [DESCRICAO_MARCADOR],
+            'TIPO': [TIPO_RECEITA],
             'VALOR': [0.0],
             'SALDO': [saldo_final],
             'OBSERVACAO': ['']
         })
     else:
-        # Ficheiro tem dados, processar normalmente
-        for col in ['DESCRICAO','CONTA','TIPO']:
+        for col in ['DESCRICAO', 'CONTA', 'TIPO']:
             if col in df.columns:
-                df[col] = df[col].astype(str).str.strip().str.replace('\x00','',regex=False)
-        
+                df[col] = df[col].astype(str).str.strip().str.replace('\x00', '', regex=False)
         df = df.dropna(how='all').reset_index(drop=True)
-        
-        idx_saldo = df[(df['CONTA'].str.upper().str.contains('SALDO ANTERIOR',na=False))&
-                       (df['DESCRICAO'].str.contains(r'\*{3}',na=False))&
-                       (df['TIPO'].str.upper()=='RECEITA')].index
-        
-        if not idx_saldo.empty:
-            idx = idx_saldo[0]
-        else:
+        idx = _encontrar_idx_saldo_anterior(df)
+        if idx is None:
             new_row = pd.DataFrame({
-                'DATA':[data_ano_seguinte],
-                'CONTA':['SALDO Dep.Poupança'],
-                'DESCRICAO':['***'],
-                'TIPO':['RECEITA'],
-                'VALOR':[0.0],
-                'SALDO':[saldo_final],
-                'OBSERVACAO':['']
+                'DATA': [data_ano_seguinte],
+                'CONTA': [CONTA_SALDO_DPRAZO],
+                'DESCRICAO': [DESCRICAO_MARCADOR],
+                'TIPO': [TIPO_RECEITA],
+                'VALOR': [0.0],
+                'SALDO': [saldo_final],
+                'OBSERVACAO': ['']
             }, index=[0])
             df = pd.concat([new_row, df.iloc[0:]]).reset_index(drop=True)
             idx = 0
-        
-        df.at[idx,'SALDO'] = saldo_final
-        df.at[idx,'VALOR'] = 0.0
-        df.at[idx,'DATA'] = data_ano_seguinte
-        df = df.iloc[:idx+1]
+        df.at[idx, 'SALDO'] = saldo_final
+        df.at[idx, 'VALOR'] = 0.0
+        df.at[idx, 'DATA'] = data_ano_seguinte
+        df.at[idx, 'CONTA'] = CONTA_SALDO_DPRAZO
+        df.at[idx, 'DESCRICAO'] = DESCRICAO_MARCADOR
+        df.at[idx, 'TIPO'] = TIPO_RECEITA
+        df = df.iloc[:idx + 1]
     
     try:
-        specs = 'DATA D;TIPO C(10);CONTA C(30);DESCRICAO C(30);VALOR N(10,2);SALDO N(10,2);OBSERVACAO C(30)'
-        return salvar_db(df, dprazo_db, specs)
-    except:
+        return gravar_tabela(df, dprazo_db, conn=conn)
+    except Exception:
         return False
 
 
-def fim_ano_e_transfere_saldo(pasta_dados='corrente'):
+def fim_ano_e_transfere_saldo(pasta_dados='corrente', validar_pos_commit=True):
     """
     Função principal de encerramento.
     
     Args:
         pasta_dados: Nome da pasta de dados (ex: 'corrente') ou caminho completo
+        validar_pos_commit: se True (omissão), corre a validação de
+            consistência depois do COMMIT (algumas leituras extra, já fora
+            da transação — não bloqueiam, mas custam tempo). Passar False
+            para saltar esta validação e tornar o encerramento mais rápido
+            (por ex. depois de já ter confirmado que está tudo OK em testes
+            anteriores).
     """
     print(f"\n{'='*80}")
     print(f"ENCERRAMENTO DE ANO - INÍCIO")
@@ -561,54 +721,219 @@ def fim_ano_e_transfere_saldo(pasta_dados='corrente'):
     # 2. Obtém saldos finais
     print(f"\n2. Obtendo saldos finais...")
     sd = obter_saldos_finais(str(saldos_db))
-    
-    # 3. Limpa ficheiros
-    print(f"\n3. Limpando ficheiros de receitas/despesas...")
-    suc = fim_ano_juros(str(juros_db))
-    suc &= fim_ano_despesas(str(despesas_db))
-    suc &= fim_ano_quotas_normais(str(receitas_n_db))
-    suc &= fim_ano_quotas_extras(str(receitas_e_db))
-    
-    if not suc:
-        print(f"⚠️ Aviso: Alguns ficheiros podem não ter sido limpos")
-    
-    # 4. Transfere saldos
-    print(f"\n4. Transferindo saldos...")
-    suc &= transfere_saldo_bancos(str(bancos_db), sd['ordem_f'])
-    suc &= transfere_saldo_caixa(str(caixa_db), sd['caixa_f'])
-    suc &= transfere_saldo_dprazo(str(dprazo_db), sd['poupanca_f'])
-    suc &= zerar_saldos(str(saldos_db), sd['poupanca_f'], sd['ordem_f'], sd['caixa_f'])
-    
-    # 5. Atualizar ano do exercício no Configs (APÓS todas as transferências!)
-    print(f"\n5. Atualizando ano do exercício...")
+
+    # 2b. Determina o ano novo ANTES de zerar as quotas.
+    # BUGFIX: fim_ano_quotas_normais/extras gravam o SALDO_ANT/SALDO
+    # transitados via save_receitas_wide(), que por omissão usa o
+    # ANO_EXERCICIO corrente em Configs. Se isto corresse ANTES do passo
+    # 5 (que só então incrementa o ANO_EXERCICIO), o saldo transitado
+    # ficava gravado em receitas_resumo sob o ano ANTIGO — e Receitas.py,
+    # já a correr no ano novo, nunca o encontrava (SALDO_ANT aparecia
+    # sempre a 0 no pivot). Por isso calculamos e passamos `novo_ano`
+    # explicitamente já aqui.
     configs_db = pasta_trabalho / 'Configs'
+    novo_ano = None
     if existe_dados(configs_db):
-        # Obter ano atual ANTES da atualização
         ano_atual = obter_ano_exercicio(str(configs_db))
         novo_ano = ano_atual + 1
-        print(f"  Ano atual: {ano_atual}")
-        print(f"  Novo ano: {novo_ano}")
-        if atualizar_ano_exercicio_configs(str(configs_db), novo_ano):
-            print(f"  ✓ Ano do exercício atualizado com sucesso!")
-        else:
-            print(f"  ⚠️ Aviso: Erro ao atualizar ano do exercício")
-            suc = False
+        print(f"  Ano atual: {ano_atual}  ->  Novo ano: {novo_ano}")
     else:
         print(f"  ⚠️ Configs não encontrado em {configs_db}")
-    
-    
-    print(f"\n{'='*80}")
-    if suc:
-        print(f"✅ ENCERRAMENTO CONCLUÍDO COM SUCESSO!")
-    else:
-        print(f"⚠️ ENCERRAMENTO CONCLUÍDO COM AVISOS")
-    print(f"{'='*80}\n")
-    
-    return suc
 
-def atualizar_ano_exercicio_configs(configs_db, ano_exercicio):
+    # 2c. Lê TODOS os DataFrames necessários ANTES de abrir a transação de
+    # escrita.
+    # PERFORMANCE: cada fim_ano_*/transfere_saldo_*/zerar_saldos chamava
+    # internamente ler_db(), que abre a SUA PRÓPRIA ligação SQLite
+    # (via get_connection/load_*_wide). Se isso corre DENTRO da transação
+    # de escrita (db_transaction já com BEGIN/lock ativo), cada uma dessas
+    # leituras fica à espera do lock de escrita ser libertado — e só é
+    # libertado no commit, no fim de tudo. Resultado: leituras em série a
+    # travar sucessivamente, tornando o fecho de ano lento.
+    # Lendo tudo aqui, fora da transação, a transação em si passa a conter
+    # apenas escritas (rápidas) na mesma ligação `conn`.
+    print(f"\n2c. Pré-lendo tabelas (fora da transação)...")
+    df_juros      = ler_db(str(juros_db))
+    df_despesas   = ler_db(str(despesas_db))
+    df_receitas_n = ler_db(str(receitas_n_db))
+    df_receitas_e = ler_db(str(receitas_e_db))
+    df_bancos     = ler_db(str(bancos_db))
+    df_caixa      = ler_db(str(caixa_db))
+    df_dprazo     = ler_db(str(dprazo_db))
+    df_saldos     = ler_db(str(saldos_db))
+    balanco_path  = pasta_trabalho / 'Balanco'
+    df_balanco    = ler_db(str(balanco_path)) if existe_dados(balanco_path) else None
+    print(f"  ✓ Pré-leitura concluída")
+
+    # 3–5. Todas as escritas dentro de uma única transação + validação final
+    print(f"\n3. Iniciando transação de escrita...")
+    erros = []
+    try:
+        with db_transaction(pasta_trabalho) as conn:
+            print(f"  ✓ Transação aberta")
+
+            # 3. Limpa ficheiros de receitas/despesas
+            # BUGFIX: Juros/Despesas têm de gravar sob `novo_ano` (igual às
+            # Receitas). Sem `ano=novo_ano`, save_*_wide usava o ANO_EXERCICIO
+            # ainda antigo → DELETE no ano arquivado + ano novo ficava vazio
+            # após o incremento em Configs.
+            print(f"\n3. Limpando ficheiros de receitas/despesas...")
+            if not fim_ano_juros(str(juros_db), ano=novo_ano, df=df_juros, conn=conn):
+                erros.append("limpar Juros")
+            if not fim_ano_despesas(str(despesas_db), ano=novo_ano, df=df_despesas, conn=conn):
+                erros.append("limpar Despesas")
+            if not fim_ano_quotas_normais(str(receitas_n_db), ano=novo_ano, df=df_receitas_n, conn=conn):
+                erros.append("limpar ReceitasN")
+            if not fim_ano_quotas_extras(str(receitas_e_db), ano=novo_ano, df=df_receitas_e, conn=conn):
+                erros.append("limpar ReceitasE")
+            if erros:
+                raise RuntimeError("Falha ao: " + ", ".join(erros))
+
+            # 4. Transfere saldos
+            print(f"\n4. Transferindo saldos...")
+            if not transfere_saldo_bancos(str(bancos_db), sd['ordem_f'], df=df_bancos, conn=conn):
+                raise RuntimeError("Falha ao transferir saldo de Bancos")
+            if not transfere_saldo_caixa(str(caixa_db), sd['caixa_f'], df=df_caixa, conn=conn):
+                raise RuntimeError("Falha ao transferir saldo de Caixa")
+            if not transfere_saldo_dprazo(str(dprazo_db), sd['poupanca_f'], df=df_dprazo, conn=conn):
+                raise RuntimeError("Falha ao transferir saldo de DPrazo")
+            if not zerar_saldos(str(saldos_db), sd['poupanca_f'], sd['ordem_f'], sd['caixa_f'],
+                                 df_saldos=df_saldos, df_balanco=df_balanco, conn=conn):
+                raise RuntimeError("Falha ao atualizar Saldos/Balanço")
+
+            # 5. Atualizar ano do exercício (ano_atual/novo_ano já calculados no passo 2b)
+            print(f"\n5. Atualizando ano do exercício...")
+            if novo_ano is not None:
+                print(f"  Novo ano: {novo_ano}")
+                if not atualizar_ano_exercicio_configs(str(configs_db), novo_ano, conn=conn):
+                    raise RuntimeError("Falha ao atualizar ANO_EXERCICIO")
+                print(f"  ✓ Ano do exercício atualizado")
+            else:
+                print(f"  ⚠️ Configs não encontrado em {configs_db} — ANO_EXERCICIO não atualizado")
+
+            print(f"\n  ✓ Todas as operações concluídas — a fazer COMMIT...")
+
+        # 6. Validação de consistência (após commit, leitura fresca) — opcional
+        avisos = []
+        if validar_pos_commit:
+            print(f"\n6. Validação de consistência pós-encerramento...")
+            avisos = _validar_consistencia_pos_encerramento(
+                pasta_trabalho, sd, novo_ano
+            )
+            if avisos:
+                print(f"  ⚠️ {len(avisos)} aviso(s) de consistência:")
+                for a in avisos:
+                    print(f"    - {a}")
+            else:
+                print(f"  ✓ Validação OK — saldos e ano consistentes")
+        else:
+            print(f"\n6. Validação de consistência pós-encerramento: SALTADA (validar_pos_commit=False)")
+
+        print(f"\n{'='*80}")
+        if avisos:
+            print(f"⚠️ ENCERRAMENTO CONCLUÍDO COM AVISOS DE CONSISTÊNCIA")
+        else:
+            print(f"✅ ENCERRAMENTO CONCLUÍDO COM SUCESSO!")
+        print(f"{'='*80}\n")
+        return True
+
+    except Exception as e:
+        print(f"\n{'='*80}")
+        print(f"❌ ENCERRAMENTO FALHOU — ROLLBACK EXECUTADO")
+        print(f"   Erro: {e}")
+        print(f"   A base de dados ficou no estado anterior ao início das alterações.")
+        print(f"   O backup em historico/ continua disponível.")
+        print(f"{'='*80}\n")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def _validar_consistencia_pos_encerramento(pasta_trabalho, sd_originais, novo_ano):
     """
-    Atualiza ANO_EXERCICIO em condominio.db.configs (via bridge carregar/salvar).
+    Validações de consistência após o commit do encerramento.
+    Devolve lista de avisos (vazia = tudo OK).
+    """
+    avisos = []
+    pasta = Path(pasta_trabalho)
+
+    # 1) Saldos iniciais = saldos finais que foram transferidos
+    try:
+        rows, _ = load_saldos_wide(pasta)
+        df = pd.DataFrame(rows, dtype=object) if rows else pd.DataFrame()
+        if df.empty:
+            avisos.append("Tabela Saldos vazia após encerramento")
+        else:
+            for tipo, esperado, label in (
+                ("poupanca", sd_originais["poupanca_f"], "Poupança_I"),
+                ("ordem",    sd_originais["ordem_f"],    "Ordem_I"),
+                ("caixa",    sd_originais["caixa_f"],    "Caixa_I"),
+            ):
+                encontrado = None
+                for _, row in df.iterrows():
+                    if _e_saldo_inicial(str(row.get("CONTA", "")), tipo):
+                        encontrado = clean_numeric(row.get("VALOR"))
+                        break
+                if encontrado is None:
+                    avisos.append(f"Saldo inicial {label} não encontrado")
+                elif abs(encontrado - esperado) > 0.015:
+                    avisos.append(
+                        f"{label} = {encontrado:.2f} (esperado {esperado:.2f})"
+                    )
+
+            # Finais devem estar a zero
+            for tipo, label in (("poupanca", "Poupança_F"), ("ordem", "Ordem_F"), ("caixa", "Caixa_F")):
+                for _, row in df.iterrows():
+                    if _e_saldo_final(str(row.get("CONTA", "")), tipo):
+                        v = clean_numeric(row.get("VALOR"))
+                        if abs(v) > 0.015:
+                            avisos.append(f"{label} não está a zero ({v:.2f})")
+                        break
+    except Exception as e:
+        avisos.append(f"Erro ao validar Saldos: {e}")
+
+    # 2) Movimentos: registo de saldo anterior com valor correto
+    for fonte, esperado, label in (
+        ("bancos", sd_originais["ordem_f"], "Bancos"),
+        ("caixa",  sd_originais["caixa_f"], "Caixa"),
+        ("dprazo", sd_originais["poupanca_f"], "DPrazo"),
+    ):
+        try:
+            rows = carregar_movimentos_fonte(pasta, fonte)
+            dfm = pd.DataFrame(rows, dtype=object) if rows else pd.DataFrame()
+            idx = _encontrar_idx_saldo_anterior(dfm)
+            if idx is None:
+                avisos.append(f"{label}: registo SALDO ANTERIOR não encontrado")
+            else:
+                saldo = clean_numeric(dfm.at[idx, "SALDO"] if "SALDO" in dfm.columns else 0)
+                if abs(saldo - esperado) > 0.015:
+                    avisos.append(
+                        f"{label} SALDO ANTERIOR = {saldo:.2f} (esperado {esperado:.2f})"
+                    )
+                # Deve ser o único / primeiro registo relevante
+                if len(dfm) > idx + 1:
+                    # Após corte, só deve restar até ao saldo anterior
+                    pass  # o corte já foi feito; se houver mais, não é crítico
+        except Exception as e:
+            avisos.append(f"Erro ao validar {label}: {e}")
+
+    # 3) Ano do exercício
+    if novo_ano is not None:
+        try:
+            ano_lido = obter_ano_exercicio(str(pasta / "Configs"))
+            if int(ano_lido) != int(novo_ano):
+                avisos.append(
+                    f"ANO_EXERCICIO = {ano_lido} (esperado {novo_ano})"
+                )
+        except Exception as e:
+            avisos.append(f"Erro ao validar ANO_EXERCICIO: {e}")
+
+    return avisos
+
+
+
+def atualizar_ano_exercicio_configs(configs_db, ano_exercicio, conn=None):
+    """Actualiza ANO_EXERCICIO via ConfigsRepo (API canónica).
+    Se `conn` for fornecido, usa essa conexão (transação externa).
     """
     try:
         print(f"\n  ═══════════════════════════════════════════════")
@@ -617,74 +942,27 @@ def atualizar_ano_exercicio_configs(configs_db, ano_exercicio):
         print(f"  Novo valor: {ano_exercicio}")
         print(f"  ═══════════════════════════════════════════════")
 
-        # Preferir API relacional directa
-        try:
-            from Database import configs as cfg_repo, create_schema
-            pasta = Path(configs_db).parent
+        pasta = resolver_pasta(configs_db)
+        if conn is None:
             create_schema(pasta)
-            antigo = cfg_repo(pasta).get_value("GERAL", "ANO_EXERCICIO", None)
-            print(f"  ℹ️  Valor atual: {antigo}")
-            cfg_repo(pasta).set_value(
-                "GERAL", "ANO_EXERCICIO", str(ano_exercicio),
-                tipo="Number", descricao="Ano atual do exercicio",
-            )
-            verificado = cfg_repo(pasta).get_value("GERAL", "ANO_EXERCICIO", None)
+        antigo = configs_repo(pasta).get_value("GERAL", "ANO_EXERCICIO", None)
+        print(f"  ℹ️  Valor atual: {antigo}")
+        configs_repo(pasta).set_value(
+            "GERAL", "ANO_EXERCICIO", str(ano_exercicio),
+            tipo="Number", descricao="Ano atual do exercicio",
+            conn=conn,
+        )
+        if conn is None:
+            verificado = configs_repo(pasta).get_value("GERAL", "ANO_EXERCICIO", None)
             if str(verificado) == str(ano_exercicio) or float(verificado) == float(ano_exercicio):
                 print(f"  ✅ CONFIRMADO: ANO_EXERCICIO = {verificado}")
                 print(f"  ═══════════════════════════════════════════════\n")
                 return True
             print(f"  ❌ Valor não confirmado: {verificado}")
             return False
-        except Exception as exc:
-            print(f"  ⚠️ API configs falhou ({exc}); a tentar bridge carregar/salvar...")
-
-        rows, _ = carregar_db(configs_db)
-        df = pd.DataFrame(rows, dtype=object)
-        if df.empty:
-            df = pd.DataFrame([{
-                'CATEGORIA': 'GERAL',
-                'CHAVE': 'ANO_EXERCICIO',
-                'VALOR': str(ano_exercicio),
-                'TIPO': 'Number',
-                'DESCRICAO': 'Ano atual do exercicio'
-            }])
-        else:
-            if 'CATEGORIA' not in df.columns:
-                df.columns = [c.upper() for c in df.columns]
-            mask = df['CATEGORIA'].astype(str).str.strip().str.upper().eq('GERAL') & \
-                   df['CHAVE'].astype(str).str.strip().str.upper().eq('ANO_EXERCICIO')
-            if mask.any():
-                valor_antigo = str(df.loc[mask, 'VALOR'].iloc[0]).strip()
-                print(f"  ℹ️  Valor atual: {valor_antigo}")
-                df.loc[mask, 'VALOR'] = str(ano_exercicio)
-            else:
-                df = pd.concat([df, pd.DataFrame([{
-                    'CATEGORIA': 'GERAL',
-                    'CHAVE': 'ANO_EXERCICIO',
-                    'VALOR': str(ano_exercicio),
-                    'TIPO': 'Number',
-                    'DESCRICAO': 'Ano atual do exercicio'
-                }])], ignore_index=True)
-
-        ok = salvar_db_compat(df, configs_db, None)
-        if not ok:
-            raise RuntimeError('salvar_db falhou para Configs')
-
-        rows_check, _ = carregar_db(configs_db)
-        df_check = pd.DataFrame(rows_check, dtype=object)
-        mask_check = df_check['CATEGORIA'].astype(str).str.strip().str.upper().eq('GERAL') & \
-                     df_check['CHAVE'].astype(str).str.strip().str.upper().eq('ANO_EXERCICIO')
-        if mask_check.any():
-            valor_verificado = str(df_check.loc[mask_check, 'VALOR'].iloc[0]).strip()
-            if valor_verificado == str(ano_exercicio):
-                print(f"  ✅ CONFIRMADO: ANO_EXERCICIO = {valor_verificado}")
-                print(f"  ═══════════════════════════════════════════════\n")
-                return True
-            print(f"  ❌ Esperado {ano_exercicio}, encontrado {valor_verificado}")
-            return False
-        print(f"  ❌ ANO_EXERCICIO não encontrado após gravação")
-        return False
-
+        print(f"  ✅ ANO_EXERCICIO definido para {ano_exercicio} (confirmado no commit)")
+        print(f"  ═══════════════════════════════════════════════\n")
+        return True
     except Exception as e:
         print(f"  ❌ Erro ao atualizar ANO_EXERCICIO: {e}")
         import traceback

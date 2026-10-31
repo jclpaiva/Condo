@@ -15,7 +15,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QVariant, QSize, QUrl, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QBrush, QFont, QDesktopServices
-from Commons import BASE_DIR, carregar_db, existe_dados
+from Commons import BASE_DIR
+from Database import existe_dados, load_balanco_wide, load_saldos_wide, resolver_pasta
 from Report import gerar_pdf_relatorio
 from Report_AI import gerar_report_ai
 
@@ -123,7 +124,7 @@ class BalancoTableModel(QAbstractTableModel):
             return False
         
         try:
-            rows, _ = carregar_db(caminho)
+            rows, _ = load_balanco_wide(resolver_pasta(caminho))
             lado_esquerdo = True
             
             for rec in rows:
@@ -269,14 +270,16 @@ class BalancoWidget(QWidget):
 
     def set_pasta_dados(self, pasta_dados):
         """Define pasta de dados e carrega Balanço se existir"""
+        from Commons import pasta_de_dados
         self.pasta_dados = pasta_dados
-        self.caminho_balanco_db = BASE_DIR / pasta_dados / "Balanco"
-        self.caminho_saldos_db = BASE_DIR / pasta_dados / "Saldos"  # ✅ NOVO
-        self.caminho_juros_db = BASE_DIR / pasta_dados / "Juros"  # ✅ NOVO
+        self.pasta = pasta_de_dados(pasta_dados)
+        # Aliases → pasta real (sem …/Balanco, …/Saldos, …)
+        self.caminho_balanco_db = self.pasta
+        self.caminho_saldos_db = self.pasta
+        self.caminho_juros_db = self.pasta
  
-        if existe_dados(self.caminho_balanco_db):
-            if self.model.load_from_db(str(self.caminho_balanco_db)):
-                # ✅ CORRIGIDO: Lê de Saldos (fonte única de verdade)
+        if existe_dados(self.pasta):
+            if self.model.load_from_db(str(self.pasta)):
                 self._carregar_saldo_exercicio()
             else:
                 self.status_label.setText("⚠️ Erro ao carregar Balanço")
@@ -290,88 +293,51 @@ class BalancoWidget(QWidget):
             QMessageBox.warning(self, "Aviso", "Pasta de dados não definida.")
             return
 
-        pasta_trabalho = BASE_DIR / self.pasta_dados
+        from Commons import pasta_de_dados
+        pasta_trabalho = getattr(self, "pasta", None) or pasta_de_dados(self.pasta_dados)
         script_dir = str(BASE_DIR)
 
         if script_dir not in sys.path:
             sys.path.insert(0, script_dir)
 
-        #self.status_label.setText("⏳ Processando balanço...")
-        #QMessageBox.information(
-        #    self,
-        #    "Processamento",
-        #    "A calcular balanço...\nEste processo pode demorar alguns segundos.",
-        #    QMessageBox.StandardButton.Ok
-        #)
-
         try:
             old_cwd = os.getcwd()
             os.chdir(str(pasta_trabalho))
 
-            # BUGFIX (arquitetural): antes, estas chamadas usavam nomes de
-            # ficheiro simples (ex.: 'Despesas') confiando no
-            # os.chdir() acima para "apontar" para pasta_trabalho. Isso
-            # funcionava com o back-end anterior, mas deixou de funcionar com o
-            # back-end SQLite: o bridge (Commons.py) resolve nomes sem
-            # componente de pasta sempre para a PASTA_CORRENTE global,
-            # fixada uma única vez no arranque — ignora por completo
-            # os.chdir(). Na prática, ao processar o balanço de uma pasta
-            # histórica (self.pasta_dados apontado para PASTA_HISTORICO/ano
-            # via Main_Gui), isto lia e GRAVAVA sempre no condominio.db da
-            # pasta corrente (ano corrente) em vez do ano histórico
-            # pretendido — confirmado com teste. A correção é passar
-            # caminhos completos, resolvidos explicitamente a partir de
-            # pasta_trabalho, em vez de depender do directório de trabalho
-            # do processo. O os.chdir() é mantido por segurança/
-            # compatibilidade mas deixa de ser necessário para a
-            # correção dos caminhos.
-            despesas_db = str(pasta_trabalho / 'Despesas')
-            receitas_n_db = str(pasta_trabalho / 'ReceitasN')
-            receitas_e_db = str(pasta_trabalho / 'ReceitasE')
-            saldos_db = str(pasta_trabalho / 'Saldos')
-            juros_db = str(pasta_trabalho / 'Juros')
-            balanco_db = str(pasta_trabalho / 'Balanco')
-            bancos_db = str(pasta_trabalho / 'Bancos')
-            caixa_db = str(pasta_trabalho / 'Caixa')
-            dprazo_db = str(pasta_trabalho / 'DPrazo')
+            # Uma única pasta lógica — resolver_pasta trata stems legados se
+            # ainda forem passados; preferimos a pasta real directamente.
+            pasta = str(pasta_trabalho)
 
-            # Chamar funções diretamente
             resultado = Balanco.processar_balanco(
-                despesas_db=despesas_db,
-                receitas_n_db=receitas_n_db,
-                receitas_e_db=receitas_e_db,
-                saldos_db=saldos_db,
-                juros_db=juros_db,
-                balanco_db=balanco_db,
+                despesas_db=pasta,
+                receitas_n_db=pasta,
+                receitas_e_db=pasta,
+                saldos_db=pasta,
+                juros_db=pasta,
+                balanco_db=pasta,
                 exportar_excel=False,
-                bancos_db=bancos_db,
-                caixa_db=caixa_db,
+                bancos_db=pasta,
+                caixa_db=pasta,
             )
 
-            # ✅ IMPORTANTE: Atualizar Saldos (inclui Saldo Exercício)
             Balanco.atualizar_saldos_finais(
-                saldos_db=saldos_db,
-                bancos_db=bancos_db,
-                caixa_db=caixa_db,
-                juros_db=juros_db,
-                dprazo_db=dprazo_db,
+                saldos_db=pasta,
+                bancos_db=pasta,
+                caixa_db=pasta,
+                juros_db=pasta,
+                dprazo_db=pasta,
             )
 
             os.chdir(old_cwd)  # Restaurar diretório original
-
-            # ✅ CORRIGIDO: Obtém valores do resultado
-            receitas = resultado.get('total_receitas', 0.0)
-            despesas = resultado.get('total_despesas', 0.0)
-            saldo_exercicio = resultado.get('saldo_exercicio', 0.0)
             
             if self.model.load_from_db(str(self.caminho_balanco_db)):
                 # ✅ CORRIGIDO: Lê de Saldos para garantir consistência
                 self._carregar_saldo_exercicio()
                 
                 QMessageBox.information(
-                    self,
-                    "Sucesso",
-                    "✅ Balanço gerado com sucesso!\nConsulte os detalhes na tabela."
+                    self, "Sucesso",
+                    "✅ <b>Balanço gerado com sucesso!</b><br><br>"
+                    "Consulte os detalhes na tabela."
                 )
             else:
                 QMessageBox.warning(self, "Aviso", "Balanço não encontrado ou vazio.")
@@ -392,7 +358,7 @@ class BalancoWidget(QWidget):
                 self.status_label.setText("📂 Saldos não encontrado.")
                 return
 
-            rows, _ = carregar_db(self.caminho_saldos_db)
+            rows, _ = load_saldos_wide(resolver_pasta(self.caminho_saldos_db))
             saldo_exercicio = 0.0
             for row in rows:
                 conta = str(row.get('CONTA', '')).strip().upper()

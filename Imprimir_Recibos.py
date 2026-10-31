@@ -18,67 +18,62 @@ from pathlib import Path
 # Importações do projecto (presentes no ambiente real)
 # ---------------------------------------------------------------------------
 try:
-    from Commons import BASE_DIR, ICONS_DIR, DOCS_DIR, obter_ano_exercicio, carregar_db
+    from Commons import BASE_DIR, ICONS_DIR, DOCS_DIR, obter_ano_exercicio
 except ImportError:
     # Fallback para testes standalone
     BASE_DIR = Path(".")
     ICONS_DIR = Path(".")
     DOCS_DIR = Path("docs")
-    def carregar_db(caminho):
-        return [], None
 
-# ---------------------------------------------------------------------------
-# Importações do projecto
-# ---------------------------------------------------------------------------
 try:
     from Condominos import carregar_condominos_db
-    from Imprimir_Recibo import gerar_recibo_pdf
 except ImportError:
-    # Fallback para testes standalone
-    def carregar_condominos_db(caminho):
-        return []
+    carregar_condominos_db = None  # type: ignore
 
-    def gerar_recibo_pdf(*args, **kwargs):
-        raise NotImplementedError("gerar_recibo_pdf não disponível")
+try:
+    from Imprimir_Recibo import (
+        ANDAR_PARA_FRACAO,
+        _andar_para_fracao_map,
+        gerar_recibo_pdf,
+    )
+except ImportError:
+    ANDAR_PARA_FRACAO = {
+        "R/c Esq.": "A", "R/c Dto.": "B",
+        "1º Esq.": "C", "1º Dto.": "D",
+        "2º Esq.": "E", "2º Dto.": "F",
+    }
+    def _andar_para_fracao_map(pasta=None):
+        return dict(ANDAR_PARA_FRACAO)
+    gerar_recibo_pdf = None  # type: ignore
 
-# ---------------------------------------------------------------------------
-# Constantes do condomínio
-# ---------------------------------------------------------------------------
-CONDOMINIO_NOME = "Condomínio Av. Sto. António, 42"
-CONDOMINIO_NIF  = "901579220"
-
-# Mapeamento ANDAR → FRAÇÃO (letra)  – corrigido "2º Dto."
-ANDAR_PARA_FRACAO = {
-    "R/c Esq.":  "A",
-    "R/c Dto.":  "B",
-    "1º Esq.":   "C",
-    "1º Dto.":   "D",
-    "2º Esq.":   "E",
-    "2º Dto.":   "F",
-}
-
-
-# ====================================================================
-# FUNÇÃO PRINCIPAL: GERAR TODOS OS RECIBOS
-# ====================================================================
 
 def gerar_recibos_para_todos_condominos(pasta_dados, output_dir=None):
     """
     Gera recibo para todos os condóminos ativos (CHECK = .T.)
 
     Args:
-        pasta_dados: Pasta de dados (ex: "corrente")
+        pasta_dados: Pasta de dados (ex: "corrente") ou Path absoluto
         output_dir: Diretório de saída (padrão: BASE_DIR/docs)
 
     Returns:
         dict: {"sucessos": [], "erros": [], "total": int}
     """
+    if carregar_condominos_db is None or gerar_recibo_pdf is None:
+        return {
+            "sucessos": [],
+            "erros": ["Dependências de recibos indisponíveis (Condominos / Imprimir_Recibo)"],
+            "total": 0,
+        }
+
     if output_dir is None:
         output_dir = BASE_DIR / "docs"
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
-    # Carregar condóminos
-    condominos_path = BASE_DIR / pasta_dados / "Condominos"
+    # Carregar condóminos (pasta absoluta ou relativa a BASE_DIR)
+    pasta = Path(pasta_dados)
+    if not pasta.is_absolute():
+        pasta = BASE_DIR / pasta_dados
+    condominos_path = pasta / "Condominos"
     condominos = carregar_condominos_db(str(condominos_path))
 
     if not condominos:
@@ -126,7 +121,8 @@ def gerar_recibos_para_todos_condominos(pasta_dados, output_dir=None):
             # Obter dados do condómino
             nome = str(c.get('NOME', '')).strip()
             andar = str(c.get('ANDAR', '')).strip()
-            fracao = ANDAR_PARA_FRACAO.get(andar, "?")
+            mapa = _andar_para_fracao_map(pasta_dados)
+            fracao = mapa.get(andar) or ANDAR_PARA_FRACAO.get(andar, "?")
 
             # Obter dados de pagamentos
             dados_pag = dados_pagamentos.get(andar)
@@ -209,7 +205,8 @@ def obter_lista_administradores(pasta_dados):
     """
     try:
         condominos_path = BASE_DIR / pasta_dados / "Condominos"
-        rows, _ = carregar_db(condominos_path)
+        from Database import carregar_condominos
+        rows = carregar_condominos(condominos_path)
 
         administradores = []
         for row in rows:

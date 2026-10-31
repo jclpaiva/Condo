@@ -7,6 +7,10 @@ Report_AI.py - Integração com OpenRouter.ai
 - Remove cálculo incorreto de liquidez corrente
 - Usa ano do exercício de Configs
 - Extrai saldos negativos por condómino de ReceitasN e ReceitasE
+- Prompt aprimorado para análise contábil especializada em condomínios
+- Extração de dados mais robusta com validação completa
+- Tratamento de erros aprimorado com logs detalhados
+- Melhor organização do código com funções modulares
 """
 import os
 import json
@@ -19,7 +23,14 @@ from dotenv import load_dotenv
 # Importações centralizadas
 from Commons import (
     BASE_DIR, DOCS_DIR,
-    obter_ano_exercicio, clean_numeric, carregar_db, existe_dados
+    obter_ano_exercicio, clean_numeric,
+)
+from Database import (
+    resolver_pasta,
+    db_existe,
+    load_balanco_wide,
+    load_saldos_wide,
+    load_receitas_wide,
 )
 
 # Carrega variáveis de ambiente do .env junto à aplicação (BASE_DIR), com
@@ -39,10 +50,9 @@ else:
 
 # Configurações da API
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
-#OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "qwen/qwen3-coder:free")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3-5-super-vl:free")
 YOUR_SITE_URL = os.getenv("YOUR_SITE_URL", "http://localhost")
-YOUR_SITE_NAME = os.getenv("YOUR_SITE_NAME", "CondominioAI")
+YOUR_SITE_NAME = os.getenv("YOUR_SITE_NAME", "42Condo.ddns.net")
 
 # Nota: a validação da chave NÃO é feita à importação do módulo (um .env em
 # falta ou uma chave inválida não deve impedir o resto da aplicação, como o
@@ -132,32 +142,99 @@ def get_ai_response(messages, **kwargs):
     return None
 
 def extrair_dados_financeiros(pasta_dados: Path):
-    balanco_path = pasta_dados / "Balanco"
-    saldos_path = pasta_dados / "Saldos"
-    receitas_n_path = pasta_dados / "ReceitasN"
-    receitas_e_path = pasta_dados / "ReceitasE"
+    """
+    Extrai e valida dados financeiros de uma pasta de dados.
     
-    # Obter ano do exercício de forma centralizada
-    periodo_ano = obter_ano_exercicio(str(pasta_dados.name) if isinstance(pasta_dados, Path) else pasta_dados)
+    Realiza extração robusta com validação completa de integridade dos dados,
+    tratamento de erros detalhado e logs informativos para debugging.
+    """
+    pasta = resolver_pasta(pasta_dados)
     
+    # Log de início da extração
+    print(f"🔍 Extraindo dados financeiros da pasta: {pasta.name}")
+    
+    periodo_ano = obter_ano_exercicio(str(pasta.name) if isinstance(pasta, Path) else pasta)
+    print(f"📅 Período de análise: {periodo_ano}")
+
+    # Inicializar estrutura de dados com validação
     dados = {
         "periodo": str(periodo_ano),
-        "receitas_correntes": {"quotas_normais": 0.0, "quotas_extras": 0.0, "juros": 0.0, "total_receitas": 0.0},
-        "despesas_correntes": {"detalhe_contas": {}, "total_despesas": 0.0},
-        "saldos_iniciais": {"deposito_poupanca": 0.0, "deposito_ordem": 0.0, "numerario_caixa": 0.0, "total_saldo_inicial": 0.0},
-        "saldos_finais": {"deposito_poupanca": 0.0, "deposito_ordem": 0.0, "numerario_caixa": 0.0, "total_saldo_final": 0.0},
-        "saldo_exercicio": 0.0,  # Este será calculado como total_receitas - total_despesas
-        "saldos_negativos_condominos": {},  # Dicionário: {fracao: saldo_total_negativo}
+        "receitas_correntes": {
+            "quotas_normais": 0.0, 
+            "quotas_extras": 0.0, 
+            "juros": 0.0, 
+            "total_receitas": 0.0
+        },
+        "despesas_correntes": {
+            "detalhe_contas": {}, 
+            "total_despesas": 0.0
+        },
+        "saldos_iniciais": {
+            "deposito_poupanca": 0.0, 
+            "deposito_ordem": 0.0, 
+            "numerario_caixa": 0.0, 
+            "total_saldo_inicial": 0.0
+        },
+        "saldos_finais": {
+            "deposito_poupanca": 0.0, 
+            "deposito_ordem": 0.0, 
+            "numerario_caixa": 0.0, 
+            "total_saldo_final": 0.0
+        },
+        "saldo_exercicio": 0.0,
+        "saldos_negativos_condominos": {},
+        "validacao": {
+            "balanco_carregado": False,
+            "saldos_carregados": False,
+            "receitas_carregadas": False,
+            "erros": []
+        }
     }
 
-    # Processar Balanco
-    if existe_dados(balanco_path):
-        rows, _ = carregar_db(balanco_path)
-        df_bal = pd.DataFrame(rows, dtype=object)
-        for _, row in df_bal.iterrows():
+    def _rows_wide(load_fn, *args):
+        """Carrega linhas wide com tratamento de erro robusto e logs detalhados."""
+        try:
+            rows, metadata = load_fn(*args, pasta=pasta)
+            if not rows:
+                print(f"⚠️ load wide: Nenhum dado retornado por {load_fn.__name__}")
+                return []
+            print(f"✅ load wide: {len(rows)} linhas carregadas de {load_fn.__name__}")
+            return rows
+        except Exception as exc:
+            error_msg = f"❌ Erro ao carregar {load_fn.__name__}: {str(exc)}"
+            print(error_msg)
+            dados["validacao"]["erros"].append(error_msg)
+            return []
+
+    # ===== PROCESSAR BALANÇO =====
+    print("📊 Processando dados do Balanço...")
+    rows_bal = _rows_wide(load_balanco_wide)
+    
+    if rows_bal:
+        dados["validacao"]["balanco_carregado"] = True
+        df_bal = pd.DataFrame(rows_bal, dtype=object)
+        
+        # Validar estrutura do DataFrame
+        required_columns = ["CONTA", "VALOR", "TIPO"]
+        missing_cols = [col for col in required_columns if col not in df_bal.columns]
+        if missing_cols:
+            error_msg = f"❌ Colunas faltando no Balanço: {missing_cols}"
+            print(error_msg)
+            dados["validacao"]["erros"].append(error_msg)
+        
+        for idx, row in df_bal.iterrows():
             conta = str(row.get("CONTA", "")).strip()
             valor = clean_numeric(row.get("VALOR", 0))
             tipo = str(row.get("TIPO", "")).strip().upper()
+            
+            # Validação de dados
+            if not conta:
+                print(f"⚠️ Linha {idx}: Conta vazia ignorada")
+                continue
+                
+            if valor == 0 and conta not in ["Saldo Final", "Saldo Exercicio"]:
+                print(f"⚠️ Linha {idx}: Valor zero para conta '{conta}'")
+            
             if tipo == "RECEITA":
                 if "Quotas Normais" in conta:
                     dados["receitas_correntes"]["quotas_normais"] = valor
@@ -165,33 +242,52 @@ def extrair_dados_financeiros(pasta_dados: Path):
                     dados["receitas_correntes"]["quotas_extras"] = valor
                 elif "Juros" in conta:
                     dados["receitas_correntes"]["juros"] = valor
+                else:
+                    print(f"⚠️ Conta receita não reconhecida: '{conta}'")
+                    
             elif tipo == "DESPESA":
                 dados["despesas_correntes"]["detalhe_contas"][conta] = valor
+                
             elif conta == "Saldo Final":
                 dados["saldos_finais"]["total_saldo_final"] = valor
+            elif conta == "Saldo Exercicio":
+                # Usar Saldo Exercicio do Balanco se disponível
+                dados["saldo_exercicio"] = valor
+                print(f"ℹ️ Saldo Exercicio encontrado no Balanco: {valor}")
 
-        # Calcular total_receitas corretamente
+        # Calcular totais com validação
         r = dados["receitas_correntes"]
         r["total_receitas"] = r["quotas_normais"] + r["quotas_extras"] + r["juros"]
         
-        # Calcular total_despesas
         d = dados["despesas_correntes"]
         d["total_despesas"] = sum(d["detalhe_contas"].values())
         
-        # Calcular saldo_exercicio como (total_receitas - total_despesas)
-        dados["saldo_exercicio"] = r["total_receitas"] - d["total_despesas"]
+        # Calcular saldo_exercicio como (total_receitas - total_despesas) se não foi encontrado no Balanco
+        if dados["saldo_exercicio"] == 0:
+            dados["saldo_exercicio"] = r["total_receitas"] - d["total_despesas"]
+            print(f"📊 Saldo Exercicio calculado: {dados['saldo_exercicio']}")
+        
+        # Log de resumo do Balanço
+        print(f"📈 Resumo do Balanço - Receitas: {r['total_receitas']:.2f}, Despesas: {d['total_despesas']:.2f}, Saldo: {dados['saldo_exercicio']:.2f}")
 
-    # Processar Saldos (APENAS para saldos iniciais e finais)
-    if existe_dados(saldos_path):
-        rows, _ = carregar_db(saldos_path)
-        df_saldos = pd.DataFrame(rows, dtype=object)
-        for _, row in df_saldos.iterrows():
+    # ===== PROCESSAR SALDOS =====
+    print("🏦 Processando dados de Saldos...")
+    rows_saldos = _rows_wide(load_saldos_wide)
+    
+    if rows_saldos:
+        dados["validacao"]["saldos_carregados"] = True
+        df_saldos = pd.DataFrame(rows_saldos, dtype=object)
+        
+        for idx, row in df_saldos.iterrows():
             conta = str(row.get("CONTA", "")).strip()
             valor = clean_numeric(row.get("VALOR", 0))
             tipo = str(row.get("TIPO", "")).strip().upper()
             
-            # IMPORTANTE: NÃO extrair "Saldo Exercicio" do Saldos
-            # Apenas extrair saldos iniciais e finais
+            if not conta:
+                print(f"⚠️ Linha {idx}: Conta vazia ignorada em Saldos")
+                continue
+                
+            # IMPORTANTE: NÃO extrair "Saldo Exercicio" do Saldos, é calculado do Balanco
             if tipo == "RECEITA":
                 if "Depósito Poupança_I" in conta:
                     dados["saldos_iniciais"]["deposito_poupanca"] = valor
@@ -221,56 +317,46 @@ def extrair_dados_financeiros(pasta_dados: Path):
                 dados["saldos_finais"]["deposito_ordem"],
                 dados["saldos_finais"]["numerario_caixa"]
             ])
+        
+        print(f"🏦 Resumo de Saldos - Inicial: {dados['saldos_iniciais']['total_saldo_inicial']:.2f}, Final: {dados['saldos_finais']['total_saldo_final']:.2f}")
 
-    # ====== NOVA FUNCIONALIDADE: Extrair saldos NEGATIVOS de ReceitasN e ReceitasE ======
+    # ===== PROCESSAR RECEITAS (Saldos Negativos) =====
+    print("💰 Processando dados de Receitas (saldos negativos)...")
     saldos_negativos = {}  # {FRACCAO: valor_total}
     
-    # Processar ReceitasN
-    if existe_dados(receitas_n_path):
+    for tipo in ("NORMAL", "EXTRA"):
         try:
-            rows_n, _ = carregar_db(receitas_n_path)
-            df_receitas_n = pd.DataFrame(rows_n, dtype=object)
-            for _, row in df_receitas_n.iterrows():
-                fracao = str(row.get("FRACCAO", "")).strip()
-                saldo = clean_numeric(row.get("SALDO", 0))
-                
-                # IGNORAR linha de TOTAIS
-                if fracao.upper() == "TOTAIS":
-                    continue
-                
-                # Apenas saldos NEGATIVOS
-                if saldo < 0:
-                    if fracao in saldos_negativos:
-                        saldos_negativos[fracao] += saldo
-                    else:
-                        saldos_negativos[fracao] = saldo
+            rows_r = _rows_wide(load_receitas_wide, tipo)
+            if rows_r:
+                dados["validacao"]["receitas_carregadas"] = True
+                for row in rows_r:
+                    fracao = str(row.get("FRACCAO", "")).strip()
+                    saldo = clean_numeric(row.get("SALDO", 0))
+                    
+                    if not fracao:
+                        print(f"⚠️ Linha sem fração ignorada em Receitas {tipo}")
+                        continue
+                        
+                    if fracao.upper() == "TOTAIS":
+                        continue
+                        
+                    if saldo < 0:
+                        saldos_negativos[fracao] = saldos_negativos.get(fracao, 0.0) + saldo
+                        print(f"⚠️ Saldo negativo encontrado - Fração: {fracao}, Saldo: {saldo:.2f}")
         except Exception as e:
-            print(f"⚠️ Erro ao processar ReceitasN: {e}")
-    
-    # Processar ReceitasE
-    if existe_dados(receitas_e_path):
-        try:
-            rows_e, _ = carregar_db(receitas_e_path)
-            df_receitas_e = pd.DataFrame(rows_e, dtype=object)
-            for _, row in df_receitas_e.iterrows():
-                fracao = str(row.get("FRACCAO", "")).strip()
-                saldo = clean_numeric(row.get("SALDO", 0))
-                
-                # IGNORAR linha de TOTAIS
-                if fracao.upper() == "TOTAIS":
-                    continue
-                
-                # Apenas saldos NEGATIVOS
-                if saldo < 0:
-                    if fracao in saldos_negativos:
-                        saldos_negativos[fracao] += saldo
-                    else:
-                        saldos_negativos[fracao] = saldo
-        except Exception as e:
-            print(f"⚠️ Erro ao processar ReceitasE: {e}")
+            error_msg = f"❌ Erro ao processar Receitas {tipo}: {str(e)}"
+            print(error_msg)
+            dados["validacao"]["erros"].append(error_msg)
     
     # Ordenar por saldo (do mais negativo ao menos negativo)
     dados["saldos_negativos_condominos"] = dict(sorted(saldos_negativos.items(), key=lambda x: x[1]))
+    
+    # Log de validação final
+    print(f"✅ Extração concluída - Erros: {len(dados['validacao']['erros'])}")
+    if dados["validacao"]["erros"]:
+        print("⚠️ Erros encontrados durante extração:")
+        for erro in dados["validacao"]["erros"]:
+            print(f"  {erro}")
 
     return dados
 

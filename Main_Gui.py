@@ -4,8 +4,10 @@ Main_Gui.py - VERSÃO COMPLETA COM INTEGRAÇÃO GMAIL (com leitura dinâmica do 
 import os
 import sys
 import shlex
-import winreg
 import subprocess
+
+if sys.platform == "win32":
+    import winreg
 
 from pathlib import Path
 from PyQt6.QtWidgets import (
@@ -37,6 +39,9 @@ from Docs_Gui import DocsWidget
 # ====================================================================
 def get_mailspring_launch_cmd():
     """Lê o comando de lançamento do Mailspring do registry (se for cliente de email default)"""
+    if sys.platform != "win32":
+        # winreg só existe no Windows; noutros SOs não há registry a ler
+        return None
     try:
         key_path = r"Software\Clients\Mail\Mailspring\Protocols\mailto\shell\open\command"
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ)
@@ -97,7 +102,7 @@ class MainWindow(QMainWindow):
     """Janela principal da aplicação"""
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("O Meu Condomínio R2.0 - Av. Sto António 42")
+        self.setWindowTitle("O Meu Condomínio V2.0 - Av. Sto António 42")
         appicon_dir = ICONS_DIR / "app_icon.png"
         self.setWindowIcon(QIcon(str(appicon_dir))) # Define o ícone da barra de título
         self.resize(1200, 700)
@@ -368,7 +373,7 @@ class MainWindow(QMainWindow):
             if index == self.exit_tab_index:
                 msg_box = QMessageBox(self)
                 msg_box.setWindowTitle("Confirmação de Saída")
-                msg_box.setText("Deseja realmente sair da aplicação?")
+                msg_box.setText("<br><b>Deseja realmente sair da aplicação?</b>")
                 msg_box.setIcon(QMessageBox.Icon.Question)
                 msg_box.setStandardButtons(
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
@@ -402,10 +407,16 @@ class MainWindow(QMainWindow):
         try:
             w = QWidget()
             lay = QVBoxLayout(w)
-            lay.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+            # REMOVIDO o AlignTop para permitir que as molas (Stretch) funcionem na vertical
+            lay.setAlignment(Qt.AlignmentFlag.AlignHCenter)
             lay.setSpacing(30)
-            lay.setContentsMargins(40, 60, 40, 40)
-
+            
+            # Margens fixas e limpas nas laterais e fundo. A altura é controlada pelas molas.
+            lay.setContentsMargins(40, 20, 40, 40)
+            
+            # 1. MOLA SUPERIOR: Empurra todo o conteúdo para o centro vertical da janela
+            lay.addStretch(1)
+            
             # Logo centralizado
             logo_container = QHBoxLayout()
             logo_container.addStretch()
@@ -427,7 +438,7 @@ class MainWindow(QMainWindow):
             lay.addLayout(logo_container)
             lay.addSpacing(20)
 
-            # Botões de seleção de ano
+            # Botões: corrente | histórico | exportar P/Condo42
             btn_layout = QHBoxLayout()
             btn_layout.addStretch()
             btn_corrente = QPushButton("Trabalhar no Ano Corrente")
@@ -436,12 +447,24 @@ class MainWindow(QMainWindow):
             btn_historico = QPushButton("Consultar Exercícios Anteriores")
             btn_historico.setFixedSize(250, 70)
             btn_historico.clicked.connect(self.selecionar_historico)
+            btn_export = QPushButton("Exportar P/ Condo42")
+            btn_export.setFixedSize(250, 70)
+            btn_export.setToolTip(
+                "Gera condo42.db (versão web) a partir do exercício "
+                "corrente e dos históricos em export/"
+            )
+            btn_export.clicked.connect(self.exportar_condo42)
             btn_layout.addWidget(btn_corrente)
             btn_layout.addSpacing(30)
             btn_layout.addWidget(btn_historico)
+            btn_layout.addSpacing(30)
+            btn_layout.addWidget(btn_export)
             btn_layout.addStretch()
             lay.addLayout(btn_layout)
-            lay.addStretch()
+            
+            # 2. MOLA INFERIOR: Garante o equilíbrio com a mola do topo
+            lay.addStretch(1)
+            
             return w
         except Exception as e:
             print(f"Erro ao criar home: {e}")
@@ -452,7 +475,7 @@ class MainWindow(QMainWindow):
         try:
             self.pasta_dados = PASTA_CORRENTE
             self.ano_selecionado = "Ano Corrente"
-            self.setWindowTitle(f"O Meu Condomínio - Av. Sto António 42 | Exercício: Ano Corrente")
+            self.setWindowTitle(f"O Meu Condomínio V2.0 - Av. Sto António 42 | Exercício: Ano Corrente")
             self.inicializar_widgets()
         except Exception as e:
             print(f"Erro ao selecionar corrente: {e}")
@@ -461,6 +484,35 @@ class MainWindow(QMainWindow):
                 "Erro",
                 f"Erro ao selecionar ano corrente:\n{e}"
             )
+
+    def exportar_condo42(self):
+        """Lança Export_db.main() — gera condo42.db para o site web."""
+        try:
+            from Export_db import main as export_main
+        except ImportError as e:
+            QMessageBox.critical(
+                self, "Erro",
+                f"Não foi possível carregar Export_db.py:\n{e}",
+            )
+            return
+
+        try:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            ok, mensagem = export_main()
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(
+                self, "Sucesso",
+                f"Erro durante a exportação:\n{e}",
+            )
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if ok:
+            QMessageBox.information(self, "Exportar", mensagem)
+        else:
+            QMessageBox.warning(self, "Exportar", mensagem)
 
     def selecionar_historico(self):
         """Seleciona ano histórico para consulta"""
@@ -487,7 +539,7 @@ class MainWindow(QMainWindow):
             if ok:
                 self.pasta_dados = os.path.join(PASTA_HISTORICO, ano)
                 self.ano_selecionado = ano
-                self.setWindowTitle(f"O Meu Condomínio - Av. Sto António 42 | Exercício: {ano}")
+                self.setWindowTitle(f"O Meu Condomínio V2.0 - Av. Sto António 42 | Exercício: {ano}")
                 self.inicializar_widgets()
         except Exception as e:
             print(f"Erro ao selecionar histórico: {e}")
@@ -597,6 +649,8 @@ class MainWindow(QMainWindow):
                 self.tab_fim_ano_index, self.fim_ano_widget, "Encerrar Ano"
             )
             self.fim_ano_widget.set_pasta_dados(self.pasta_dados)
+            # Após encerramento bem-sucedido, refrescar todos os dataforms
+            self.fim_ano_widget.dados_atualizados.connect(self.refrescar_apos_encerramento)
 
             # Widget de Configurações
             self.configuracoes_widget = ConfiguracoesWidget(parent=self)
@@ -621,6 +675,54 @@ class MainWindow(QMainWindow):
                 "Erro",
                 f"Erro ao inicializar módulos:\n{e}"
             )
+
+    def refrescar_apos_encerramento(self):
+        """
+        Recarrega todos os dataforms a partir da BD após o encerramento de ano.
+
+        O Fim_Ano grava em corrente os saldos de abertura e zera receitas/
+        despesas/juros do ano novo; sem este refresh, as tabs continuariam
+        a mostrar os DataFrames em memória do ano que acabou de fechar.
+        """
+        if not self.pasta_dados:
+            return
+        try:
+            pasta = self.pasta_dados
+            # Cada set_pasta_dados() recarrega o modelo a partir do SQLite
+            for nome, widget in (
+                ("dashboard", self.dashboard_widget),
+                ("bancos", self.bancos_widget),
+                ("dprazo", self.dprazo_widget),
+                ("caixa", self.caixa_widget),
+                ("receitas", self.receitas_widget),
+                ("despesas", self.despesas_widget),
+                ("balanco", self.balanco_widget),
+                ("docs", self.docs_widget),
+                ("condominos", self.condominos_widget),
+                ("configuracoes", self.configuracoes_widget),
+            ):
+                if widget is not None and hasattr(widget, "set_pasta_dados"):
+                    try:
+                        widget.set_pasta_dados(pasta)
+                    except Exception as e:
+                        print(f"⚠️ refrescar {nome}: {e}")
+
+            self.atualizar_saldos()
+            # Título com o novo ANO_EXERCICIO (se legível)
+            try:
+                from Commons import obter_ano_exercicio
+                novo = obter_ano_exercicio(pasta)
+                self.ano_selecionado = str(novo)
+                self.setWindowTitle(
+                    f"O Meu Condomínio V2.0 - Av. Sto António 42 | Exercício: {novo}"
+                )
+            except Exception:
+                pass
+            print("✅ Dataforms sincronizados após encerramento de ano")
+        except Exception as e:
+            print(f"❌ Erro ao refrescar após encerramento: {e}")
+            import traceback
+            traceback.print_exc()
 
     def atualizar_saldos(self):
         """Atualiza saldos no footer - mostra apenas na aba correspondente"""
@@ -670,7 +772,7 @@ if __name__ == "__main__":
         app.setStyleSheet(get_app_stylesheet())
         app.setFont(QFont("Segoe UI", 9))
         window = MainWindow()
-        window.show()
+        window.showMaximized()        # window.show()
         sys.exit(app.exec())
     except Exception as e:
         print(f"Erro fatal na aplicação: {e}")

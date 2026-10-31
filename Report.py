@@ -1,7 +1,8 @@
 """
 Report.py - Geração de relatório consolidado em PDF (Despesas, Receitas, Balanço)
 - Lê dados SQLite da pasta relativa fornecida
-- Salva SEMPRE como: BASE_DIR / "docs" / "Relatorio_Condominio.pdf"
+- Salva como: BASE_DIR / "docs" / "Relatorio_{ANO_EXERCICIO}.pdf"
+  (ano dos movimentos, não o ano civil em que o PDF é gerado)
 - Usa DOCS_DIR e format_number de Commons.py
 """
 
@@ -21,8 +22,15 @@ from Commons import (
     DOCS_DIR,
     FONTS_DIR,
     format_number,
-    carregar_db,
-    registar_fonte
+    registar_fonte,
+    obter_ano_exercicio,
+)
+from Database import (
+    resolver_pasta,
+    db_existe,
+    load_despesas_wide,
+    load_receitas_wide,
+    load_balanco_wide,
 )
 
 # ===================== CONFIG =====================
@@ -38,7 +46,7 @@ FONT_NAME = registar_fonte()
 
 def _numero_seguro(valor):
     """
-    Converte um valor vindo do bridge (carregar_db) para float, tratando
+    Converte um valor vindo de load_*_wide para float, tratando
     None/'' como 0.0. Necessário porque, com o SQLite-first, todos os
     valores voltam como texto (str), mesmo os campos numéricos - ao
     contrário de valores já tipados.
@@ -72,26 +80,36 @@ def emparelhar_balanco(esq, dir):
 def gerar_pdf_relatorio(pasta_dados: str):
     """
     Gera um único PDF com Despesas, Receitas Normais, Receitas Extraordinárias e Balanço.
-    Salva SEMPRE como: BASE_DIR / "docs" / "Relatorio_Condominio.pdf"
+    Salva como: docs/Relatorio_{ANO_EXERCICIO}.pdf
+    (ano dos movimentos / exercício, não o ano civil da geração).
     """
-    pasta_dados = BASE_DIR / pasta_dados
-    if not pasta_dados.exists():
-        raise FileNotFoundError(f"Pasta de dados não encontrada: {pasta_dados}")
+    pasta_dados = resolver_pasta(BASE_DIR / pasta_dados if not Path(pasta_dados).is_absolute() else pasta_dados)
+    if not db_existe(pasta_dados):
+        raise FileNotFoundError(f"condominio.db não encontrada em: {pasta_dados}")
 
-    despesas = carregar_db(pasta_dados / "Despesas")
-    receitasN = carregar_db(pasta_dados / "ReceitasN")
-    receitasE = carregar_db(pasta_dados / "ReceitasE")
-    balanco_rows, _ = carregar_db(pasta_dados / "Balanco")
+    def _load(wide_fn, *args):
+        try:
+            rows, fields = wide_fn(*args, pasta=pasta_dados)
+            return rows or [], fields
+        except Exception as exc:
+            print(f"⚠️ load wide: {exc}")
+            return [], []
+
+    despesas = _load(load_despesas_wide)
+    receitasN = _load(load_receitas_wide, "NORMAL")
+    receitasE = _load(load_receitas_wide, "EXTRA")
+    balanco_rows, _ = _load(load_balanco_wide)
 
     if not any([despesas[0], receitasN[0], receitasE[0], balanco_rows]):
         raise ValueError("Nenhum dado válido encontrado.")
 
-    pdf_file = DOCS_DIR / "Relatorio_Condominio.pdf"
+    ano = obter_ano_exercicio(pasta_dados)
+    pdf_file = DOCS_DIR / f"Relatorio_{ano}.pdf"
 
     try:
         pdfmetrics.registerFont(TTFont("SegoeUI", "segoeui.ttf"))
         FONT_NAME = "SegoeUI"
-    except:
+    except Exception:
         FONT_NAME = "Helvetica"
 
     doc = SimpleDocTemplate(

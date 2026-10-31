@@ -31,19 +31,24 @@ HIDDEN_IMPORTS = [
     'Bancos',
     'Bancos_Gui',
     'Caixa_Gui',
+    'Commons',  
+    'Condominos'
     'Condominos_Gui',
     'Configuracoes_Gui',
-    'Database.py',
     'Dashboard_Gui',
+    'Database',
     'Despesas',
     'Despesas_Gui',
     'Docs_Gui',
+    'DPrazo_Gui'
+    'Export_db'
     'Fim_Ano',
     'Fim_Ano_Gui',
-    'Commons',
+    'Gerar_Ata'
     'Imprimir_Recibo',
     'Imprimir_Recibos',
     'Logging_utils',
+    'Quotas',
     'Receitas',
     'Receitas_Gui',
     'Report',
@@ -99,20 +104,32 @@ def criar_estrutura_pastas():
     dist_path = BASE_DIR / "dist"
     
     # Pastas que devem existir fora do executável
-    pastas_externas = ['icons', 'fotos', 'docs', 'corrente', 'historico', 'logs']
+    pastas_externas = ['corrente', 'docs', 'export', 'fonts', 'fotos', 'historico', 'icons', 'import', 'logs', 'templates']
     
     for pasta in pastas_externas:
         origem = BASE_DIR / pasta
         destino = dist_path / pasta
         
-        if pasta in ['icons', 'fotos', 'docs'] and origem.exists():
-            # Copiar icons, fotos e docs
+        # Correção feita aqui: 'fonts' agora tem a aspa inicial
+        if pasta in ['corrente', 'docs', 'fonts', 'export', 'fotos', 'historico', 'icons', 'import'] and origem.exists():
             shutil.copytree(origem, destino, dirs_exist_ok=True)
             print(f"   ✓ {pasta}/ copiado")
         else:
-            # Criar pastas vazias para corrente, historico, logs
+            # Criar pastas vazia para logs
             destino.mkdir(parents=True, exist_ok=True)
             print(f"   ✓ {pasta}/ criado (vazio)")
+
+
+    # Copiar o ficheiro .env para dist/.env
+    env_origem = BASE_DIR / ".env"
+    env_destino = dist_path / ".env"
+
+    if env_origem.is_file():
+        shutil.copy2(env_origem, env_destino)
+        print("   ✓ .env copiado para dist/.env")
+    else:
+        print("   ⚠️ Aviso: ficheiro .env não encontrado na raiz do projeto")
+
 
 def compilar():
     """Compila o executável com PyInstaller"""
@@ -168,12 +185,16 @@ def criar_readme():
 
 2. Estrutura de pastas:
    - GestaoCondominio\\ : Executável e bibliotecas
-   - docs\\             : Doccs da aplicação
-   - icons\\            : Ícones da aplicação
-   - fotos\\            : Fotos dos condóminos
    - corrente\\         : Dados do ano corrente (vazia)
+   - docs\\             : Doccs da aplicação
+   - export\\           : Ficheiros para Condo42 web
+   - fonts\\            : Fontes true type
+   - fotos\\            : Fotos dos condóminos
    - historico\\        : Dados de anos anteriores (vazia)
+   - icons\\            : Ícones da aplicação
+   - import\\           : ficheiros a importar
    - logs\\             : Logs da aplicação (vazia)
+   - templates\\        : Template da Ata da Reunião 
 
 3. IMPORTANTE: NÃO mova o executável para fora da
    pasta GestaoCondominio\\. Mantenha toda a estrutura

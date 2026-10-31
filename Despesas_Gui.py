@@ -2,7 +2,7 @@
 Despesas_Gui.py - Widget de visualização de despesas (Pivot Table)
 Funcionalidades:
 - Preferência pela view pivot relacional (v_despesas_pivot)
-- Fallback para tabela Despesas via bridge (condominio.db)
+- Fallback para tabela Despesas via load_*_wide (condominio.db)
 - Botão Atualizar executa Despesas.py e sincroniza para condominio.db
 - Linha TOTAIS destacada, formatação de moeda, somente leitura
 """
@@ -15,12 +15,13 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QVariant
 from PyQt6.QtGui import QColor, QBrush, QFont
-# Importa código compartilhado
-from Commons import BASE_DIR, PASTA_CORRENTE, clean_numeric, carregar_db, existe_dados
+# Constantes / utilitários
+from Commons import BASE_DIR, PASTA_CORRENTE, clean_numeric, db_path
+# Acesso a dados → Database
+from Database import load_despesas_wide, resolver_pasta, existe_dados
 try:
     from Database import (
         despesas as despesas_repo,
-        db_path,
         ensure_views_and_fts,
         ConfigsRepo,
     )
@@ -114,7 +115,12 @@ class DespesasPivotModel(QAbstractTableModel):
                 return False
             ensure_views_and_fts(pasta)
             if ano is None:
-                ano = int(ConfigsRepo(pasta).get_value("GERAL", "ANO_EXERCICIO", 2026) or 2026)
+                from datetime import date as _date
+                _raw = ConfigsRepo(pasta).get_value("GERAL", "ANO_EXERCICIO", None)
+                try:
+                    ano = int(float(str(_raw).replace(",", "."))) if _raw not in (None, "") else _date.today().year
+                except (TypeError, ValueError):
+                    ano = _date.today().year
             rows = despesas_repo(pasta).pivot(ano)
             meses_cols = ["JAN", "FEV", "MAR", "ABR", "MAI", "JUN",
                           "JUL", "AGO", "SET", "OUT", "NOV", "DEZ"]
@@ -126,13 +132,11 @@ class DespesasPivotModel(QAbstractTableModel):
 
             for r in rows:
                 row = {"DESPESAS": str(r["conta"] or "")}
-                total = 0.0
                 for mk, col in zip(mes_keys, meses_cols):
                     val = float(r[mk] or 0)
                     row[col] = val
                     totals[col] += val
-                    total += val
-                row["TOTAL"] = float(r["total"] or total)
+                row["TOTAL"] = float(r["total"] or 0)
                 totals["TOTAL"] += row["TOTAL"]
                 self._data.append(row)
 
@@ -149,7 +153,7 @@ class DespesasPivotModel(QAbstractTableModel):
             return False
 
     def load_from_db(self, caminho):
-        """Fallback: carrega tabela Despesas via bridge (condominio.db)."""
+        """Fallback: carrega tabela Despesas via load_*_wide (condominio.db)."""
         self.beginResetModel()
         self._data = []
         path = Path(caminho)
@@ -157,7 +161,7 @@ class DespesasPivotModel(QAbstractTableModel):
             self.endResetModel()
             return False
         try:
-            rows, _ = carregar_db(path)
+            rows, _ = load_despesas_wide(resolver_pasta(path))
             for rec in rows:
                 row = {
                     "DESPESAS": str(rec.get("DESPESAS", "")).strip(),
@@ -279,7 +283,10 @@ class DespesasWidget(QWidget):
     
     def _carregar_despesas(self):
         """Preferência: view pivot relacional; fallback: tabela plana."""
-        pasta = BASE_DIR / self.pasta_dados if self.pasta_dados else PASTA_CORRENTE
+        from Commons import pasta_de_dados
+        pasta = getattr(self, "pasta", None) or (
+            pasta_de_dados(self.pasta_dados) if self.pasta_dados else PASTA_CORRENTE
+        )
         ok = False
         src = "legado"
 
@@ -288,8 +295,8 @@ class DespesasWidget(QWidget):
             if ok:
                 src = "views pivot"
 
-        if not ok and self.caminho_despesas_db and existe_dados(self.caminho_despesas_db):
-            ok = self.model.load_from_db(str(self.caminho_despesas_db))
+        if not ok and existe_dados(pasta):
+            ok = self.model.load_from_db(str(pasta))
             src = "SQLite"
 
         if ok:
@@ -304,8 +311,10 @@ class DespesasWidget(QWidget):
 
     def set_pasta_dados(self, pasta_dados):
         """Define pasta de dados e carrega despesas (sem recalcular)."""
+        from Commons import pasta_de_dados
         self.pasta_dados = pasta_dados
-        self.caminho_despesas_db = BASE_DIR / pasta_dados / "Despesas"
+        self.pasta = pasta_de_dados(pasta_dados)
+        self.caminho_despesas_db = self.pasta  # alias pasta real
         self._carregar_despesas()
 
     def atualizar_despesas(self):
@@ -314,7 +323,8 @@ class DespesasWidget(QWidget):
             QMessageBox.warning(self, "Aviso", "Pasta de dados não definida.")
             return
 
-        pasta_trabalho = BASE_DIR / self.pasta_dados
+        from Commons import pasta_de_dados
+        pasta_trabalho = getattr(self, "pasta", None) or pasta_de_dados(self.pasta_dados)
         if not pasta_trabalho.exists():
             QMessageBox.critical(self, "Erro", f"Pasta de trabalho não existe: {pasta_trabalho}")
             return
@@ -328,10 +338,9 @@ class DespesasWidget(QWidget):
                 num_contas = sum(1 for row in self.model._data
                                  if str(row.get("DESPESAS", "")).upper() != "TOTAIS")
                 QMessageBox.information(
-                    self,
-                    "Sucesso",
-                    f"Despesas atualizadas com sucesso!\n\n"
-                    f"Contas processadas: {num_contas} registos",
+                    self, "Sucesso",
+                    f"<b>Despesas atualizadas com sucesso!</b><br><br>"
+                    f"Contas processadas: <b>{num_contas}</b> registos",
                 )
             else:
                 QMessageBox.warning(self, "Aviso", "Sem dados de despesas após o processamento.")

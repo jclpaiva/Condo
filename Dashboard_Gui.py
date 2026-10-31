@@ -18,7 +18,14 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 from Commons import BASE_DIR
-from Database import carregar_db, existe_dados
+from Database import (
+    resolver_pasta,
+    db_existe,
+    load_receitas_wide,
+    load_despesas_wide,
+    load_juros_wide,
+    load_balanco_wide,
+)
 
 
 # ====================================================================
@@ -81,8 +88,8 @@ class DashboardWidget(QWidget):
         top_row.setSpacing(6)
         self.canvas_rec_n = MplCanvas(self, width=4.5, height=2.3, dpi=85)
         self.canvas_rec_e = MplCanvas(self, width=4.5, height=2.3, dpi=85)
-        top_row.addWidget(self.canvas_rec_n)
-        top_row.addWidget(self.canvas_rec_e)
+        top_row.addWidget(self.canvas_rec_n, stretch=1)
+        top_row.addWidget(self.canvas_rec_e, stretch=1)
         graficos_layout.addLayout(top_row)
 
         # Linha inferior - Despesas e Balanço
@@ -94,15 +101,19 @@ class DashboardWidget(QWidget):
         bottom_row.addWidget(self.canvas_balanco, stretch=1)
         graficos_layout.addLayout(bottom_row)
 
-        layout.addLayout(graficos_layout)
+        # stretch=1 faz com que graficos_layout absorva todo o espaço vertical
+        # extra que a janela ganhar, em vez de esse espaço ficar por usar
+        # (é esse espaço não distribuído que antes impedia o eixo Y de crescer)
+        layout.addLayout(graficos_layout, stretch=1)
 
         self.status_label = QLabel("Aguardando dados...")
         self.status_label.setStyleSheet("color: #666; font-style: italic; font-size: 9pt; padding: 2px;")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(self.status_label)
 
-        # Define altura máxima para não forçar resize da janela principal
-        self.setMaximumHeight(680)
+        # Removido o setMaximumHeight(680): esse limite impedia o widget (e,
+        # por consequência, os canvases) de crescer verticalmente além de
+        # 680px, mesmo com QSizePolicy.Expanding definido no MplCanvas.
 
     # ====================================================================
     # CARREGAMENTO DE DADOS
@@ -116,20 +127,19 @@ class DashboardWidget(QWidget):
             self.status_label.setText("⚠️ Pasta de dados não definida")
             return
         try:
-            rec_n_path = BASE_DIR / self.pasta_dados / "ReceitasN"
-            rec_e_path = BASE_DIR / self.pasta_dados / "ReceitasE"
-            desp_path = BASE_DIR / self.pasta_dados / "Despesas"
-            bal_path = BASE_DIR / self.pasta_dados / "Balanco"
-            juros_path = BASE_DIR / self.pasta_dados / "Juros"
+            pasta = resolver_pasta(BASE_DIR / self.pasta_dados)
+            if not db_existe(pasta):
+                self.status_label.setText("⚠️ condominio.db não encontrada")
+                return
 
-            dados_rec_n = self.carregar_receitas(rec_n_path)
-            dados_rec_e = self.carregar_receitas(rec_e_path)
-            dados_desp = self.carregar_despesas(desp_path)
-            dados_despesas_por_conta = self.carregar_despesas_detalhadas(desp_path)
-            saldo_anterior, saldo_final_db = self.carregar_saldo_balanco(bal_path)
-            total_rec_n = self.extrair_total_linha_totais(rec_n_path)
-            total_rec_e = self.extrair_total_linha_totais(rec_e_path)
-            juros = self.carregar_juros(juros_path)
+            dados_rec_n = self.carregar_receitas(pasta, "NORMAL")
+            dados_rec_e = self.carregar_receitas(pasta, "EXTRA")
+            dados_desp = self.carregar_despesas(pasta)
+            dados_despesas_por_conta = self.carregar_despesas_detalhadas(pasta)
+            saldo_anterior, saldo_final_db = self.carregar_saldo_balanco(pasta)
+            total_rec_n = self.extrair_total_linha_totais(pasta, "NORMAL")
+            total_rec_e = self.extrair_total_linha_totais(pasta, "EXTRA")
+            juros = self.carregar_juros(pasta)
             total_despesas = sum(dados_desp) if isinstance(dados_desp, list) else 0
 
             # Garantir que todos os valores são numéricos válidos
@@ -178,97 +188,79 @@ class DashboardWidget(QWidget):
     # ====================================================================
     # FUNÇÕES DE CARREGAMENTO
     # ====================================================================
-    def carregar_receitas(self, caminho):
-        if not existe_dados(caminho):
-            return {}
+    def carregar_receitas(self, pasta, tipo_quota="NORMAL"):
         try:
-            rows, _ = carregar_db(caminho)
-            meses = ["JAN","FEV","MAR","ABR","MAI","JUN","JUL","AGO","SET","OUT","NOV","DEZ"]
+            rows, _ = load_receitas_wide(tipo_quota, pasta)
+            meses = ["JAN", "FEV", "MAR", "ABR", "MAI", "JUN", "JUL", "AGO", "SET", "OUT", "NOV", "DEZ"]
             dados = {}
-            for rec in rows:
-                fr = str(rec.get('FRACCAO', '')).strip()
-                if fr and fr.upper() != 'TOTAIS':
+            for rec in rows or []:
+                fr = str(rec.get("FRACCAO", "")).strip()
+                if fr and fr.upper() != "TOTAIS":
                     dados[fr] = [float(rec.get(m, 0) or 0) for m in meses]
             return dados
         except Exception as exc:
-            print(f"Erro ao carregar receitas {caminho.name}: {exc}")
+            print(f"Erro ao carregar receitas {tipo_quota}: {exc}")
             return {}
 
-    def carregar_despesas(self, caminho):
-        if not existe_dados(caminho):
-            return [0]*12
+    def carregar_despesas(self, pasta):
         try:
-            rows, _ = carregar_db(caminho)
-            meses = ["JAN","FEV","MAR","ABR","MAI","JUN","JUL","AGO","SET","OUT","NOV","DEZ"]
-            totais = [0]*12
-            for rec in rows:
-                if str(rec.get('DESPESAS', '')).strip().upper() == 'TOTAIS':
-                    totais = [float(rec.get(m, 0) or 0) for m in meses]
-                    break
-            return totais
+            rows, _ = load_despesas_wide(pasta)
+            meses = ["JAN", "FEV", "MAR", "ABR", "MAI", "JUN", "JUL", "AGO", "SET", "OUT", "NOV", "DEZ"]
+            for rec in rows or []:
+                if str(rec.get("DESPESAS", "")).strip().upper() == "TOTAIS":
+                    return [float(rec.get(m, 0) or 0) for m in meses]
+            return [0] * 12
         except Exception as exc:
-            print(f"Erro ao carregar despesas {caminho.name}: {exc}")
-            return [0]*12
+            print(f"Erro ao carregar despesas: {exc}")
+            return [0] * 12
 
-    def carregar_despesas_detalhadas(self, caminho):
-        if not existe_dados(caminho):
-            return {}
+    def carregar_despesas_detalhadas(self, pasta):
         try:
-            rows, _ = carregar_db(caminho)
+            rows, _ = load_despesas_wide(pasta)
+            meses = ["JAN", "FEV", "MAR", "ABR", "MAI", "JUN", "JUL", "AGO", "SET", "OUT", "NOV", "DEZ"]
             totais = {}
-            for rec in rows:
-                conta = str(rec.get('DESPESAS', '')).strip()
-                if conta.upper() != 'TOTAIS':
-                    total_anual = sum(float(rec.get(m, 0) or 0) for m in ["JAN","FEV","MAR","ABR","MAI","JUN","JUL","AGO","SET","OUT","NOV","DEZ"])
+            for rec in rows or []:
+                conta = str(rec.get("DESPESAS", "")).strip()
+                if conta.upper() != "TOTAIS":
+                    total_anual = sum(float(rec.get(m, 0) or 0) for m in meses)
                     if total_anual != 0:
                         totais[conta] = total_anual
             return totais
         except Exception as exc:
-            print(f"Erro ao carregar despesas detalhadas {caminho.name}: {exc}")
+            print(f"Erro ao carregar despesas detalhadas: {exc}")
             return {}
-    
-    def extrair_total_linha_totais(self, caminho):
-        """Extrai o valor total da linha 'TOTAIS' (soma mensal)."""
-        if not existe_dados(caminho):
-            return 0.0
+
+    def extrair_total_linha_totais(self, pasta, tipo_quota="NORMAL"):
         try:
-            rows, _ = carregar_db(caminho)
-            meses = ["JAN","FEV","MAR","ABR","MAI","JUN","JUL","AGO","SET","OUT","NOV","DEZ"]
-            total = 0.0
-            for rec in rows:
-                if str(rec.get('FRACCAO', '')).strip().upper() == 'TOTAIS':
-                    total = sum(float(rec.get(m, 0) or 0) for m in meses)
-                    break
-            return total
+            rows, _ = load_receitas_wide(tipo_quota, pasta)
+            meses = ["JAN", "FEV", "MAR", "ABR", "MAI", "JUN", "JUL", "AGO", "SET", "OUT", "NOV", "DEZ"]
+            for rec in rows or []:
+                if str(rec.get("FRACCAO", "")).strip().upper() == "TOTAIS":
+                    return sum(float(rec.get(m, 0) or 0) for m in meses)
+            return 0.0
         except Exception as exc:
-            print(f"Erro ao carregar totais {caminho.name}: {exc}")
+            print(f"Erro ao carregar totais {tipo_quota}: {exc}")
             return 0.0
 
-    def carregar_juros(self, caminho):
-        """Carrega o valor único de Juros (coluna TOTAL)."""
-        if not existe_dados(caminho):
-            return 0.0
+    def carregar_juros(self, pasta):
         try:
-            rows, _ = carregar_db(caminho)
-            valor = 0.0
+            rows, _ = load_juros_wide(pasta)
             if rows:
-                valor = float(rows[0].get('TOTAL', 0) or 0.0)
-            return valor if valor == valor else 0.0
+                valor = float(rows[0].get("TOTAL", 0) or 0.0)
+                return valor if valor == valor else 0.0
+            return 0.0
         except Exception as e:
             print(f"Erro ao carregar juros: {e}")
             return 0.0
 
-    def carregar_saldo_balanco(self, caminho):
-        """Lê Saldo Anterior e Saldo Final do Balanço."""
+    def carregar_saldo_balanco(self, pasta):
         saldo_ant = 0.0
         saldo_fin = 0.0
-        if not existe_dados(caminho):
-            return saldo_ant, saldo_fin
         try:
-            rows, _ = carregar_db(caminho)
-            for rec in rows:
-                conta = str(rec.get('CONTA', '')).strip().lower()
-                valor = float(rec.get('VALOR') or 0.0)
+            rows, _ = load_balanco_wide(pasta)
+            for rec in rows or []:
+                conta = str(rec.get("CONTA", "")).strip().lower()
+                valor = float(rec.get("VALOR") or 0.0)
                 if valor != valor:
                     valor = 0.0
                 if "saldo anterior" in conta:

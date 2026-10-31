@@ -22,11 +22,19 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QVariant, QSize, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QBrush, QIcon
 
-# Importa codigo compartilhado
+# Constantes / utilitários / delegates
 from Commons import (
-    BASE_DIR, ICONS_DIR, ContaComboBoxDelegate,
-    carregar_contas, clean_numeric, format_currency, carregar_db,
-    salvar_db, existe_dados
+    BASE_DIR, IMPORT_DIR, ICONS_DIR, ContaComboBoxDelegate,
+    clean_numeric, format_currency,
+)
+# Acesso a dados → Database
+from Database import (
+    resolver_pasta,
+    carregar_movimentos_fonte,
+    guardar_movimentos_fonte,
+    fonte_de_path,
+    carregar_contas,
+    existe_dados,
 )
 
 
@@ -107,26 +115,17 @@ class ImportacaoWorker(QThread):
             try:
                 self.progresso.emit(50, "Importando movimentos bancarios...")
 
-                # BUGFIX (arquitetural): nomes simples ('Configs',
-                # 'Bancos') confiavam no os.chdir() acima, que deixou
-                # de ter efeito sobre a resolução de caminhos do back-end
-                # SQLite (ver nota equivalente em Balanco_Gui.py). Usar
-                # caminhos completos a partir de self.pasta_trabalho
-                # garante que a importação actua sempre na pasta
-                # pretendida (mesmo quando é uma pasta histórica).
-                configs_path = str(self.pasta_trabalho / 'Configs')
-                bancos_path = str(self.pasta_trabalho / 'Bancos')
+                # Pasta lógica única (sem stems legados Configs/Bancos)
+                pasta = str(self.pasta_trabalho)
 
-                # Chama as funções diretamente
-                configs, condominos, regras_gerais = Bancos.carregar_configuracoes_e_regras(configs_path)
+                configs, condominos, regras_gerais = Bancos.carregar_configuracoes_e_regras(pasta)
                 
                 self.progresso.emit(70, "Processando e categorizando...")
                 
-                # Usa o caminho CSV recebido do QFileDialog
                 Bancos.importar_e_processar_bancos(
                     self.csv_path,
                     configs,
-                    bancos_path,
+                    pasta,
                     condominos,
                     regras_gerais
                 )
@@ -135,7 +134,7 @@ class ImportacaoWorker(QThread):
                 
                 os.chdir(old_cwd)  # Restaurar diretorio
                 
-                self.concluido.emit(True, "Importação concluída com sucesso!")
+                self.concluido.emit(True, "<br><b>Importação concluída!</b>")
                 
             except Exception as e:
                 os.chdir(old_cwd)  # Restaurar mesmo em caso de erro
@@ -265,21 +264,19 @@ class BancosTableModel(QAbstractTableModel):
         return False
 
     def load_bancos_db(self, caminho):
-        """Carrega dados de movimentos bancários (SQLite)."""
+        """Carrega movimentos bancários via API canónica (fonte=bancos).
+
+        ``caminho`` pode ser a pasta de dados ou um path legado (…/Bancos).
+        """
         self.beginResetModel()
         self._data = []
-        path = Path(caminho)
-        
-        if not existe_dados(path):
-            print(f"Ficheiro não encontrado: {caminho}")
-            self.endResetModel()
-            return
-        
         try:
-            rows, _ = carregar_db(path)
+            pasta = resolver_pasta(caminho)
+            fonte = "bancos"
+            rows = carregar_movimentos_fonte(pasta, fonte)
             for rec in rows:
                 try:
-                    data_val = rec.get('DATA')
+                    data_val = rec.get("DATA")
                     if isinstance(data_val, str):
                         try:
                             data = datetime.fromisoformat(data_val[:10])
@@ -289,15 +286,14 @@ class BancosTableModel(QAbstractTableModel):
                         data = datetime(1900, 1, 1)
                     else:
                         data = data_val
-                    
                     self._data.append({
-                        'DATA': data,
-                        'TIPO': str(rec.get('TIPO', '')).strip(),
-                        'CONTA': str(rec.get('CONTA', '')).strip(),
-                        'DESCRICAO': str(rec.get('DESCRICAO', '')).strip(),
-                        'VALOR': float(rec.get('VALOR') or 0.0),
-                        'SALDO': float(rec.get('SALDO') or 0.0),
-                        'OBSERVACAO': str(rec.get('OBSERVACAO', '')).strip()
+                        "DATA": data,
+                        "TIPO": str(rec.get("TIPO", "")).strip(),
+                        "CONTA": str(rec.get("CONTA", "")).strip(),
+                        "DESCRICAO": str(rec.get("DESCRICAO", "")).strip(),
+                        "VALOR": float(rec.get("VALOR") or 0.0),
+                        "SALDO": float(rec.get("SALDO") or 0.0),
+                        "OBSERVACAO": str(rec.get("OBSERVACAO", "")).strip(),
                     })
                 except Exception as e:
                     print(f"Erro ao processar registo: {e}")
@@ -306,44 +302,39 @@ class BancosTableModel(QAbstractTableModel):
             print(f"ERRO AO LER MOVIMENTOS BANCÁRIOS: {e}")
             import traceback
             traceback.print_exc()
-        
         self.endResetModel()
-    
+
     def save_to_db(self, caminho):
-        """Guarda alterações em SQLite."""
+        """Guarda movimentos via API canónica (fonte=bancos)."""
         if not self._data:
             print("Nenhum dado para salvar")
             return False
-        
         try:
+            pasta = resolver_pasta(caminho)
+            fonte = "bancos"
             rows = []
             for row_data in self._data:
                 try:
-                    data_obj = row_data.get('DATA')
+                    data_obj = row_data.get("DATA")
                     if isinstance(data_obj, datetime):
                         data_value = data_obj.date()
-                    elif hasattr(data_obj, 'date'):
+                    elif hasattr(data_obj, "date"):
                         data_value = data_obj.date()
                     else:
                         data_value = datetime(1900, 1, 1).date()
-
                     rows.append({
-                        'DATA': data_value,
-                        'TIPO': str(row_data.get('TIPO', ''))[:10],
-                        'CONTA': str(row_data.get('CONTA', ''))[:30],
-                        'DESCRICAO': str(row_data.get('DESCRICAO', ''))[:30],
-                        'VALOR': float(row_data.get('VALOR', 0.0)),
-                        'SALDO': float(row_data.get('SALDO', 0.0)),
-                        'OBSERVACAO': str(row_data.get('OBSERVACAO', ''))[:32]
+                        "DATA": data_value,
+                        "TIPO": str(row_data.get("TIPO", ""))[:10],
+                        "CONTA": str(row_data.get("CONTA", ""))[:30],
+                        "DESCRICAO": str(row_data.get("DESCRICAO", ""))[:30],
+                        "VALOR": float(row_data.get("VALOR", 0.0)),
+                        "SALDO": float(row_data.get("SALDO", 0.0)),
+                        "OBSERVACAO": str(row_data.get("OBSERVACAO", ""))[:32],
                     })
                 except Exception as e:
                     print(f"Erro ao preparar registo: {e}")
                     continue
-
-            df = pd.DataFrame(rows, dtype=object)
-            field_specs = 'DATA D; TIPO C(10); CONTA C(30); DESCRICAO C(30); VALOR N(10,2); SALDO N(10,2); OBSERVACAO C(32)'
-            return salvar_db(df, caminho, field_specs)
-
+            return guardar_movimentos_fonte(rows, pasta=pasta, fonte=fonte)
         except Exception as e:
             print(f"Erro ao guardar movimentos: {e}")
             import traceback
@@ -455,11 +446,14 @@ class BancosWidget(QWidget):
     def set_pasta_dados(self, pasta_dados):
         """Define pasta de dados e carrega contas + tabela"""
         try:
+            from Commons import pasta_de_dados
             self.pasta_dados = pasta_dados
-            self.caminho_bancos_db = BASE_DIR / pasta_dados / "Bancos"
+            self.pasta = pasta_de_dados(pasta_dados)
+            # Alias legado: APIs que ainda aceitam path usam a pasta real
+            self.caminho_bancos_db = self.pasta
             
             # Carrega contas
-            receitas, despesas, todas = carregar_contas(pasta_dados)
+            receitas, despesas, todas = carregar_contas(self.pasta)
             
             if not todas:
                 QMessageBox.warning(
@@ -513,7 +507,7 @@ class BancosWidget(QWidget):
         
         try:
             if self.model.save_to_db(str(self.caminho_bancos_db)):
-                QMessageBox.information(self, "Sucesso", "Alterações guardadas com sucesso!")
+                QMessageBox.information(self, "Sucesso", "<b>Alterações guardadas com sucesso!</b>")
                 self.carregar_tabela()
             else:
                 QMessageBox.critical(self, "Erro", "Erro ao guardar alterações.")
@@ -534,25 +528,23 @@ class BancosWidget(QWidget):
             csv_path, _ = QFileDialog.getOpenFileName(
                 self,
                 "Selecionar extrato bancario CSV",
-                str(BASE_DIR / self.pasta_dados),
+                str(IMPORT_DIR),
                 "CSV (*.csv)"
             )
             
             if not csv_path:
                 return
             
-            # Define pasta de trabalho (pasta de dados do ano)
-            pasta_trabalho = BASE_DIR / self.pasta_dados
+            from Commons import pasta_de_dados
+            pasta_trabalho = getattr(self, "pasta", None) or pasta_de_dados(self.pasta_dados)
             
-            # Verifica se Configs existe
-            configs_path = pasta_trabalho / "Configs"
-            if not existe_dados(configs_path):
+            if not existe_dados(pasta_trabalho):
                 QMessageBox.critical(
                     self,
                     "Erro",
-                    f"Configs não encontrado!\n\n"
-                    f"Localização esperada:\n{configs_path}\n\n"
-                    f"Por favor, certifique-se que a pasta de dados está correta:\n{pasta_trabalho}"
+                    f"Base de dados não encontrada!\n\n"
+                    f"Pasta:\n{pasta_trabalho}\n\n"
+                    f"Certifique-se que condominio.db existe nesta pasta."
                 )
                 return
             

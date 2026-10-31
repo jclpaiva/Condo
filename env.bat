@@ -1,7 +1,7 @@
 @echo off
-setlocal
+setlocal EnableExtensions
+cd /d "%~dp0"
 
-:: Step 1: Show the user options
 :menu
 cls
 echo ================================
@@ -11,62 +11,93 @@ echo 1. Create Python environment
 echo 2. Activate Python environment
 echo 3. Install requirements
 echo 4. Deactivate Python environment
-echo 5. Exit
+echo 5. Enable PowerShell scripts (ExecutionPolicy)
+echo 6. Exit
 echo ================================
-set /p choice="Choose an option (1-5): "
+set /p choice="Choose an option (1-6): "
 
-:: Step 2: Handle user choice
-if "%choice%"=="0" goto enable_scripts
 if "%choice%"=="1" goto create_env
 if "%choice%"=="2" goto activate_env
 if "%choice%"=="3" goto install_requirements
 if "%choice%"=="4" goto deactivate_env
-if "%choice%"=="5" goto exit_script
+if "%choice%"=="5" goto enable_scripts
+if "%choice%"=="6" goto exit_script
 goto menu
 
-
-:: Step 3: Create Python environment
 :enable_scripts
-echo Enablel running Scripts...
-Set-ExecutionPolicy unrestricted
-echo Running Scripts enabled.
+echo Enabling script execution for CurrentUser...
+powershell -NoProfile -Command "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force"
+powershell -NoProfile -Command "Remove-Item (Get-PSReadLineOption).HistorySavePath -Force"
+if errorlevel 1 (
+    echo Failed. Try running this script as Administrator.
+) else (
+    echo Execution policy updated (CurrentUser / RemoteSigned).
+)
 pause
 goto menu
 
-
-:: Step 3: Create Python environment
 :create_env
-echo Creating Python virtual environment...
-python -m venv myenv
-echo Virtual environment created.
+echo Creating Python virtual environment in "myenv"...
+where python >nul 2>&1
+if errorlevel 1 (
+    echo python not found in PATH. Trying "py"...
+    py -3 -m venv myenv
+) else (
+    python -m venv myenv
+)
+if exist "myenv\Scripts\python.exe" (
+    echo Virtual environment created.
+) else (
+    echo Failed to create virtual environment.
+)
 pause
 goto menu
 
-:: Step 4: Activate Python environment
 :activate_env
+if not exist "myenv\Scripts\activate.bat" (
+    echo Environment not found. Create it first (option 1).
+    pause
+    goto menu
+)
 echo Activating Python virtual environment...
-call myenv\Scripts\activate
-echo Virtual environment activated.
+call "myenv\Scripts\activate.bat"
+echo Virtual environment activated for this window.
+echo python:
+where python
 pause
 goto menu
 
-:: Step 5: Install requirements from requirements.txt
 :install_requirements
-echo Installing requirements from requirements.txt...
-pip install -r requirements.txt
+if not exist "requirements.txt" (
+    echo requirements.txt not found in %cd%
+    pause
+    goto menu
+)
+if not exist "myenv\Scripts\python.exe" (
+    echo Environment not found. Create it first (option 1).
+    pause
+    goto menu
+)
+echo Installing requirements into the virtual environment...
+call "myenv\Scripts\activate.bat"
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 echo Requirements installed.
 pause
 goto menu
 
-:: Step 6: Deactivate Python environment
 :deactivate_env
 echo Deactivating Python virtual environment...
-call myenv\Scripts\deactivate
-echo Virtual environment deactivated.
+call deactivate 2>nul
+if errorlevel 1 (
+    echo No active virtual environment in this window.
+) else (
+    echo Virtual environment deactivated.
+)
 pause
 goto menu
 
-:: Step 7: Exit the script
 :exit_script
-echo Exiting the script...
-exit
+echo Exiting...
+endlocal
+exit /b 0

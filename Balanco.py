@@ -13,106 +13,117 @@ from Commons import (
     obter_ano_exercicio,
     calcular_numero_admin,
 )
-from Database import carregar_db, salvar_db
+from Database import (
+    resolver_pasta,
+    load_despesas_wide,
+    load_receitas_wide,
+    load_juros_wide,
+    load_saldos_wide,
+    load_balanco_wide,
+    save_balanco_wide,
+    save_saldos_wide,
+    movimentos_dataframe,
+    carregar_movimentos_fonte,
+)
 
-logger = ativar_logging("Balanco")
-
-class PrintToLogger:
-    def write(self, msg):
-        msg = msg.rstrip()
-        if msg:
-            logger.info(msg)
-
-    def flush(self):
-        pass
-
-sys.stdout = PrintToLogger()
-sys.stderr = PrintToLogger()
+logger = ativar_logging("balanco")
+# ativar_logging já redirecciona stdout/stderr para o ficheiro de log.
 
 # ====================================================================
 # PARTE 1: CARREGAR DADOS DOS MÓDULOS
 # ====================================================================
-# a
+
 def carregar_despesas(despesas_db='Despesas'):
     try:
-        rows, _ = carregar_db(despesas_db)
+        pasta = resolver_pasta(despesas_db)
+        rows, _ = load_despesas_wide(pasta)
+        if not rows:
+            rows, _ = load_despesas_wide(resolver_pasta(despesas_db))
         df = pd.DataFrame(rows, dtype=object)
         if df.empty:
             return []
         despesas = []
         for _, row in df.iterrows():
-            conta = str(row['DESPESAS']).strip()
-            if conta.upper() == 'TOTAIS':
+            conta = str(row["DESPESAS"]).strip()
+            if conta.upper() == "TOTAIS":
                 continue
-            valor = clean_numeric(row.get('TOTAL', 0))
+            valor = clean_numeric(row.get("TOTAL", 0))
             if valor > 0.01:
-                despesas.append({'conta': conta, 'valor': valor})
+                despesas.append({"conta": conta, "valor": valor})
         return despesas
     except Exception as e:
         print(f"ERRO ao carregar despesas: {e}")
         return []
-#b
-def carregar_quotas_normais(receitas_n_db='ReceitasN'):
+
+
+def carregar_quotas_normais(receitas_n_db="ReceitasN"):
     try:
-        rows, _ = carregar_db(receitas_n_db)
+        pasta = resolver_pasta(receitas_n_db)
+        rows, _ = load_receitas_wide("NORMAL", pasta)
+        if not rows:
+            rows, _ = load_receitas_wide('NORMAL', resolver_pasta(receitas_n_db))
         df = pd.DataFrame(rows, dtype=object)
         if df.empty:
             return 0.0
-        totais = df[df['FRACCAO'].astype(str).str.strip().str.upper() == 'TOTAIS']
+        totais = df[df["FRACCAO"].astype(str).str.strip().str.upper() == "TOTAIS"]
         if totais.empty:
             return 0.0
-        return clean_numeric(totais.iloc[0].get('TOTAL', 0))
+        return clean_numeric(totais.iloc[0].get("TOTAL", 0))
     except Exception as e:
         print(f"ERRO ao carregar quotas normais: {e}")
         return 0.0
-#c
-def carregar_quotas_extras(receitas_e_db='ReceitasE'):
+
+
+def carregar_quotas_extras(receitas_e_db="ReceitasE"):
     try:
-        rows, _ = carregar_db(receitas_e_db)
+        pasta = resolver_pasta(receitas_e_db)
+        rows, _ = load_receitas_wide("EXTRA", pasta)
+        if not rows:
+            rows, _ = load_receitas_wide('EXTRA', resolver_pasta(receitas_e_db))
         df = pd.DataFrame(rows, dtype=object)
         if df.empty:
             return 0.0
-        totais = df[df['FRACCAO'].astype(str).str.strip().str.upper() == 'TOTAIS']
+        totais = df[df["FRACCAO"].astype(str).str.strip().str.upper() == "TOTAIS"]
         if totais.empty:
             return 0.0
-        return clean_numeric(totais.iloc[0].get('TOTAL', 0))
+        return clean_numeric(totais.iloc[0].get("TOTAL", 0))
     except Exception as e:
         print(f"ERRO ao carregar quotas extras: {e}")
         return 0.0
 #d                            
 def carregar_juros(juros_db='Juros'):
     """
-    Soma o valor total de juros a partir da tabela Juros (condominio.db).
-    Se existir uma linha "TOTAIS" (várias contas geradoras de juros), usa-a.
-    Caso contrário (apenas uma conta gera juros, gerar_receitas_juros não
-    escreve linha TOTAIS), soma o TOTAL de todas as linhas existentes.
+    Soma o valor total de juros (load_juros_wide).
     """
     try:
-        rows, _ = carregar_db(juros_db)
+        pasta = resolver_pasta(juros_db)
+        rows, _ = load_juros_wide(pasta)
+        if not rows:
+            rows, _ = load_juros_wide(resolver_pasta(juros_db))
         df = pd.DataFrame(rows, dtype=object)
         if df.empty:
             print("  ⚠️  Juros está vazio")
             return 0.0
         primeira_coluna = df.columns[0]
         rotulo = df[primeira_coluna].astype(str).str.strip().str.upper()
-        totais = df[rotulo == 'TOTAIS']
+        totais = df[rotulo == "TOTAIS"]
         if not totais.empty:
-            valor = clean_numeric(totais.iloc[0].get('TOTAL', 0))
-        elif 'TOTAL' in df.columns:
-            valor = sum(clean_numeric(v) for v in df['TOTAL'])
+            valor = clean_numeric(totais.iloc[0].get("TOTAL", 0))
+        elif "TOTAL" in df.columns:
+            valor = sum(clean_numeric(v) for v in df["TOTAL"])
         else:
             print(f"  ⚠️  Coluna TOTAL não encontrada em {juros_db}")
             return 0.0
-        print(f"  ✓ Juros carregados de {juros_db}: {valor:.2f}")
+        print(f"  ✓ Juros carregados: {valor:.2f}")
         return valor
     except Exception as e:
-        print(f"  ❌ ERRO ao carregar juros de {juros_db}: {e}")
+        print(f"  ❌ ERRO ao carregar juros: {e}")
         return 0.0
 
 #e
 def obter_saldos_iniciais(saldos_db='Saldos'):
     try:
-        rows, _ = carregar_db(saldos_db)
+        rows, _ = load_saldos_wide(resolver_pasta(saldos_db))
         df = pd.DataFrame(rows, dtype=object)
         if df.empty:
             print(f"  ⚠️  {saldos_db} vazio")
@@ -201,13 +212,13 @@ def gerar_balanco(
     print("\nPASSO 3: Calculando saldos finais baseados em movimentos...")
     initial_poup = saldos_iniciais['deposito_poupanca']
 
-    # BUGFIX: `carregar_db` era chamado aqui com os nomes fixos 'Bancos'
+    # BUGFIX: leitura de movimentos era chamada com os nomes fixos 'Bancos'
     # e 'Caixa' (em vez dos parâmetros `bancos_db`/`caixa_db`, que nem
     # sequer existiam antes desta correção). Como estes nomes não têm
     # componente de pasta, resolviam sempre para a PASTA_CORRENTE global,
     # ignorando por completo a pasta em que despesas_db/receitas_n_db/etc.
     # realmente estavam — ver nota mais detalhada em processar_balanco().
-    rows_bancos, _ = carregar_db(bancos_db)
+    rows_bancos = carregar_movimentos_fonte(resolver_pasta(bancos_db), 'bancos')
     df_bancos = pd.DataFrame(rows_bancos, dtype=object)
     
     patterns_dep = ['REGRA_DEP_POUPANCA', 'DEP POUPANCA']
@@ -221,7 +232,7 @@ def gerar_balanco(
     
     ultimo_saldo_bancos = clean_numeric(df_bancos.iloc[-1]['SALDO']) if not df_bancos.empty else 0.0
     
-    rows_caixa, _ = carregar_db(caixa_db)
+    rows_caixa = carregar_movimentos_fonte(resolver_pasta(caixa_db), 'caixa')
     df_caixa = pd.DataFrame(rows_caixa, dtype=object)
     ultimo_saldo_caixa = clean_numeric(df_caixa.iloc[-1]['SALDO']) if not df_caixa.empty else 0.0
     
@@ -308,13 +319,7 @@ def gerar_balanco(
     registos.append({'CONTA': '', 'TIPO': '', 'VALOR': 0.0})  # linha em branco
     registos.append({'CONTA': 'TOTAL', 'TIPO': 'TOTAL', 'VALOR': total_creditos})
     
-    # Salva em Balanco (condominio.db) pelo bridge de compatibilidade.
-    field_specs = (
-        'CONTA C(50); '
-        'TIPO C(10); '
-        'VALOR N(10,2) '
-    )
-
+    # Salva em Balanco via API canónica (save_balanco_wide)
     df_balanco = pd.DataFrame(registos)
     if 'CONTA' in df_balanco.columns:
         df_balanco['CONTA'] = df_balanco['CONTA'].astype(str).str[:50]
@@ -323,11 +328,10 @@ def gerar_balanco(
     if 'VALOR' in df_balanco.columns:
         df_balanco['VALOR'] = pd.to_numeric(df_balanco['VALOR'], errors='coerce').fillna(0.0)
 
-    ok = salvar_db(df_balanco[['CONTA', 'TIPO', 'VALOR']], output_db, field_specs)
-    if ok:
-        print(f"  ✓ {len(registos)} registos salvos em {output_db}")
-    else:
-        print(f"  ⚠️ Falha ao gravar {output_db}")
+    pasta = resolver_pasta(output_db)
+    save_balanco_wide(df_balanco[["CONTA", "TIPO", "VALOR"]], pasta)
+    ok = True
+    print(f"  ✓ {len(registos)} registos salvos (balanco wide) em {pasta}")
     
     return {
         'total_despesas': total_despesas,
@@ -350,7 +354,7 @@ def exibir_balanco(balanco_db='Balanco'):
     print("-" * 120)
     
     try:
-        rows, _ = carregar_db(balanco_db)
+        rows, _ = load_balanco_wide(resolver_pasta(balanco_db))
         df = pd.DataFrame(rows, dtype=object)
         
         # Divide em lados
@@ -452,7 +456,7 @@ def atualizar_saldos_finais(saldos_db='Saldos', bancos_db='Bancos', caixa_db='Ca
         # ============================================================
         print("\nPASSO 2: Calculando Depósito Poupança Final a partir de DPrazo...")
         try:
-            rows_dprazo, _ = carregar_db(dprazo_db)
+            rows_dprazo = carregar_movimentos_fonte(resolver_pasta(dprazo_db), 'dprazo')
             df_dprazo = pd.DataFrame(rows_dprazo, dtype=object)
             
             if df_dprazo.empty:
@@ -510,7 +514,7 @@ def atualizar_saldos_finais(saldos_db='Saldos', bancos_db='Bancos', caixa_db='Ca
         # 3. OBTER DEPÓSITO ORDEM FINAL (mantém-se)
         # ============================================================
         print("\nPASSO 3: Obtendo Depósito Ordem Final...")
-        rows_bancos, _ = carregar_db(bancos_db)
+        rows_bancos = carregar_movimentos_fonte(resolver_pasta(bancos_db), 'bancos')
         df_bancos = pd.DataFrame(rows_bancos, dtype=object)
         deposito_ordem_f = clean_numeric(df_bancos.iloc[-1]['SALDO']) if not df_bancos.empty else 0.0
         print(f"  ✓ Depósito Ordem Final: {deposito_ordem_f:.2f}")
@@ -519,7 +523,7 @@ def atualizar_saldos_finais(saldos_db='Saldos', bancos_db='Bancos', caixa_db='Ca
         # 4. OBTER NUMERÁRIO CAIXA FINAL (mantém-se)
         # ============================================================
         print("\nPASSO 4: Obtendo Numerário Caixa Final...")
-        rows_caixa, _ = carregar_db(caixa_db)
+        rows_caixa = carregar_movimentos_fonte(resolver_pasta(caixa_db), 'caixa')
         df_caixa = pd.DataFrame(rows_caixa, dtype=object)
         numerario_caixa_f = clean_numeric(df_caixa.iloc[-1]['SALDO']) if not df_caixa.empty else 0.0
         print(f"  ✓ Numerário Caixa Final: {numerario_caixa_f:.2f}")
@@ -548,8 +552,8 @@ def atualizar_saldos_finais(saldos_db='Saldos', bancos_db='Bancos', caixa_db='Ca
         # ============================================================
         print("\nPASSO 6: Atualizando tabela Saldos...")
 
-        # Leitura via bridge e gravação via bridge consistente.
-        rows_saldos, _ = carregar_db(saldos_db)
+        # Leitura e gravação via API canónica.
+        rows_saldos, _ = load_saldos_wide(resolver_pasta(saldos_db))
         df_saldos = pd.DataFrame(rows_saldos, dtype=object)
         for idx, row in df_saldos.iterrows():
             c = str(row.get('CONTA', '')).strip().upper()
@@ -570,9 +574,7 @@ def atualizar_saldos_finais(saldos_db='Saldos', bancos_db='Bancos', caixa_db='Ca
                 df_saldos.at[idx, 'VALOR'] = round(juros_valor, 2)
                 print(f"  ✓ Juros gravados em Saldos: {juros_valor:.2f}")
 
-        specs_saldos = 'CONTA C(50);DESCRICAO C(50);TIPO C(10);VALOR N(10,2);SALDO N(10,2);OBSERVACAO C(30)'
-        if not salvar_db(df_saldos, saldos_db, specs_saldos):
-            raise RuntimeError('salvar_db falhou para Saldos')
+        save_saldos_wide(df_saldos, resolver_pasta(saldos_db))
         
         # ============================================================
         # 7. RESUMO FINAL
@@ -611,7 +613,7 @@ def atualizar_saldos_finais(saldos_db='Saldos', bancos_db='Bancos', caixa_db='Ca
 # ====================================================================
 def exportar_balanco_excel(balanco_db='Balanco', output_excel='Balanco.xlsx'):
     try:
-        rows, _ = carregar_db(balanco_db)
+        rows, _ = load_balanco_wide(resolver_pasta(balanco_db))
         df = pd.DataFrame(rows, dtype=object)
         
         with pd.ExcelWriter(output_excel, engine='openpyxl') as writer:
@@ -646,6 +648,9 @@ def processar_balanco(
 ):
     """
     Processo principal de geração do balanço.
+
+    Os argumentos ``*_db`` são **legado de compatibilidade** (resolvem a
+    pasta via ``resolver_pasta``); leitura/gravação em ``condominio.db``.
     """
 
     # BUGFIX: 'Bancos' aqui também estava fixo em vez de usar o

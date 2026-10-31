@@ -1,14 +1,11 @@
 """
-Configuracoes_Gui.py - Widget de configurações (Configs, Contas, Regras e Analisar CSV)
-Funcionalidades:
-- Aba "Configurações" com quatro sub-abas: "Analisar CSV", "Configs", "Contas" e "Regras"
-- Aba "Regras": CRUD completo sobre regras_classificacao (tabela relacional)
-  - Colunas: Prioridade | Classe | Conta | Pattern | Normal | Extra
-  - Insert/Delete com teclado (Ins / Del) ou botões
-  - Combo para Classe (RECEITA/DESPESA) e Conta (lista de contas ativas)
-  - Grava directamente na DB via RegrasRepo (V5)
-- Botão "Gravar" no topo (Configs + Contas legacy)
-- Estilo idêntico ao widget de Receitas
+Configuracoes_Gui.py - Widget de configurações (Configs, Regras, Frações e Analisar CSV)
+
+- Abas: Analisar CSV | Frações | Configs | Regras
+- Regras: CRUD via RegrasRepo (SQL)
+- Frações: CRUD via FracoesRepo (SQL) — Fração, Andar, Permilagem
+- Contas (tabela DBF) eliminada na V5 — contas vêm de regras
+- Botão Gravar (azul): grava Configs, Frações e Regras
 """
 
 import pandas as pd
@@ -22,8 +19,14 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QVariant, QSize
 from PyQt6.QtGui import QColor, QBrush, QIcon
-from Commons import BASE_DIR, ICONS_DIR, carregar_db, salvar_db, existe_dados
-from Database import RegrasRepo, get_connection, db_path
+# Constantes / utilitários
+from Commons import BASE_DIR, IMPORT_DIR, ICONS_DIR, db_path
+# Acesso a dados → Database
+from Database import (
+    carregar_configs, guardar_configs, resolver_pasta,
+    RegrasRepo, FracoesRepo, get_connection,
+    existe_dados,
+)
 
 # Importar módulo de análise CSV
 from Analisar_csv import analyze_and_update
@@ -106,7 +109,7 @@ class ConfigsTableModel(QAbstractTableModel):
             self.endResetModel()
             return False
         try:
-            rows, _ = carregar_db(caminho)
+            rows = carregar_configs(caminho)
             for rec in rows:
                 row = {}
                 for field in self.headers:
@@ -148,133 +151,7 @@ class ConfigsTableModel(QAbstractTableModel):
                     'DESCRICAO': str(row.get('DESCRICAO', ''))[:30]
                 })
             df = pd.DataFrame(rows, dtype=object)
-            field_specs = 'CATEGORIA C(16);CHAVE C(35);VALOR C(20);TIPO C(7);DESCRICAO C(30)'
-            return salvar_db(df, caminho, field_specs)
-        except Exception as e:
-            print(f"❌ Erro ao salvar {caminho.name}: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-
-class ContasTableModel(QAbstractTableModel):
-    def __init__(self):
-        super().__init__()
-        self._data = []
-        self.headers = ["TIPO", "CONTA"]
-
-    def rowCount(self, parent=QModelIndex()):
-        return len(self._data)
-
-    def columnCount(self, parent=QModelIndex()):
-        return len(self.headers)
-
-    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        if not index.isValid():
-            return QVariant()
-        row = self._data[index.row()]
-        col_name = self.headers[index.column()]
-        value = row.get(col_name, "")
-        if role == Qt.ItemDataRole.DisplayRole:
-            return str(value) if value is not None else ""
-        elif role == Qt.ItemDataRole.EditRole:
-            # Retorna o valor original para edição
-            return str(value) if value is not None else ""
-        elif role == Qt.ItemDataRole.TextAlignmentRole:
-            return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        elif role == Qt.ItemDataRole.BackgroundRole:
-            if index.row() % 2 == 0:
-                return QBrush(QColor("#F5F5F5"))
-            return QVariant()
-        return QVariant()
-
-    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
-        if role == Qt.ItemDataRole.DisplayRole:
-            if orientation == Qt.Orientation.Horizontal:
-                return self.headers[section]
-            elif orientation == Qt.Orientation.Vertical:
-                return str(section + 1)  # ou section se quiser começar do 0
-        return QVariant()
-
-    def flags(self, index):
-        return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEditable
-
-    def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
-        if not index.isValid() or role != Qt.ItemDataRole.EditRole:
-            return False
-        
-        row = index.row()
-        col_name = self.headers[index.column()]
-        
-        # Converte valor para string
-        new_value = str(value) if value is not None else ""
-        
-        # Pega valor atual
-        current_value = str(self._data[row][col_name]) if self._data[row][col_name] is not None else ""
-        
-        # Se o valor não mudou, não faz nada (importante!)
-        if new_value == current_value:
-            return False
-        
-        # Se o novo valor é vazio E o campo tinha conteúdo, cancela a edição
-        # (previne apagar acidentalmente com Enter)
-        if not new_value.strip() and current_value.strip():
-            return False
-        
-        # Atualiza apenas se houve mudança real
-        self._data[row][col_name] = new_value
-        self.dataChanged.emit(index, index)
-        return True
-
-    def load_from_db(self, caminho):
-        self.beginResetModel()
-        self._data = []
-        caminho = Path(caminho)
-        if not existe_dados(caminho):
-            self.endResetModel()
-            return False
-        try:
-            rows, _ = carregar_db(caminho)
-            for rec in rows:
-                row = {}
-                for field in self.headers:
-                    val = rec.get(field, "") if rec.get(field, "") is not None else ""
-                    row[field] = str(val).strip() if val is not None else ""
-                self._data.append(row)
-            self.endResetModel()
-            return True
-        except Exception as e:
-            print(f"❌ Erro ao carregar {caminho.name}: {e}")
-            self.endResetModel()
-            return False
-
-    def add_row(self):
-        new_row = {h: "" for h in self.headers}
-        self.beginInsertRows(QModelIndex(), len(self._data), len(self._data))
-        self._data.append(new_row)
-        self.endInsertRows()
-        return len(self._data) - 1
-
-    def remove_row(self, row_index):
-        if 0 <= row_index < len(self._data):
-            self.beginRemoveRows(QModelIndex(), row_index, row_index)
-            del self._data[row_index]
-            self.endRemoveRows()
-            return True
-        return False
-
-    def save_to_db(self, caminho):
-        caminho = Path(caminho)
-        try:
-            rows = []
-            for row in self._data:
-                rows.append({
-                    'TIPO': str(row.get('TIPO', ''))[:10],
-                    'CONTA': str(row.get('CONTA', ''))[:30]
-                })
-            df = pd.DataFrame(rows, dtype=object)
-            field_specs = 'TIPO C(10);CONTA C(30)'
-            return salvar_db(df, caminho, field_specs)
+            return guardar_configs(df, pasta=caminho)
         except Exception as e:
             print(f"❌ Erro ao salvar {caminho.name}: {e}")
             import traceback
@@ -340,14 +217,9 @@ class RegrasTableModel(QAbstractTableModel):
                 return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
             return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         if role == Qt.ItemDataRole.BackgroundRole:
-            # Células Normal/Extra de quotas: fundo cinza (só leitura)
-            if col in (_COL_NORMAL, _COL_EXTRA):
-                conta = str(row.get("Conta") or "").strip().upper()
-                classe = str(row.get("Classe") or "").strip().upper()
-                if classe == "RECEITA" and conta.startswith("QUOTA"):
-                    return QBrush(QColor("#E8E8E8"))
             if index.row() % 2 == 0:
-                return QBrush(QColor("#F5F5F5"))
+                return QBrush(QColor("#F5F5F5"))  # linha par = cinza
+            return QBrush(QColor("#FFFFFF"))       # linha ímpar = branco
         return QVariant()
 
     def flags(self, index):
@@ -545,6 +417,182 @@ class _PrioDelegate(QStyledItemDelegate):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Model + Delegate para a aba Frações
+# ──────────────────────────────────────────────────────────────────────────────
+
+_FRACOES_HEADERS = ["Fração", "Andar", "Permilagem", ""]
+_COL_FRACAO = 0
+_COL_ANDAR  = 1
+_COL_PERM   = 2
+_COL_FILL   = 3  # placeholder: preenche o espaço à direita (linhas a largura total)
+
+
+class FracoesTableModel(QAbstractTableModel):
+    """
+    Model em memória para a tabela `fracoes` (fracao, andar, permilagem).
+    Cada linha é um dict com as chaves dos headers.
+    '_id' guarda o id da DB (None = linha nova ainda não gravada).
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._rows: list[dict] = []
+        self._dirty = False
+
+    def rowCount(self, parent=QModelIndex()):
+        return len(self._rows)
+
+    def columnCount(self, parent=QModelIndex()):
+        return len(_FRACOES_HEADERS)
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if role == Qt.ItemDataRole.DisplayRole:
+            if orientation == Qt.Orientation.Horizontal:
+                return _FRACOES_HEADERS[section]
+            return str(section + 1)
+        return QVariant()
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return QVariant()
+        row = self._rows[index.row()]
+        col = index.column()
+        val = row.get(_FRACOES_HEADERS[col], "")
+
+        if role == Qt.ItemDataRole.DisplayRole:
+            if col == _COL_PERM:
+                return f"{float(val or 0):.3f}"
+            return "" if val is None else str(val)
+        if role == Qt.ItemDataRole.EditRole:
+            if col == _COL_PERM:
+                return float(val or 0)
+            return "" if val is None else str(val)
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            return Qt.AlignmentFlag.AlignCenter
+        if role == Qt.ItemDataRole.BackgroundRole:
+            if index.row() % 2 == 0:
+                return QBrush(QColor("#F5F5F5"))
+        return QVariant()
+
+    def flags(self, index):
+        if not index.isValid():
+            return Qt.ItemFlag.NoItemFlags
+        base = (Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+        if index.column() == _COL_FILL:
+            return base  # placeholder: não editável
+        return base | Qt.ItemFlag.ItemIsEditable
+
+    def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
+        if not index.isValid() or role != Qt.ItemDataRole.EditRole:
+            return False
+        col = index.column()
+        if col == _COL_FILL:
+            return False
+        if col == _COL_FRACAO:
+            value = str(value).strip().upper()
+        elif col == _COL_ANDAR:
+            value = str(value).strip()
+        else:
+            try:
+                value = float(str(value).replace(",", "."))
+            except ValueError:
+                return False
+        self._rows[index.row()][_FRACOES_HEADERS[col]] = value
+        self._dirty = True
+        self.dataChanged.emit(index, index)
+        return True
+
+    def load(self, pasta: Path):
+        """Carrega as frações da BD (ordenadas por fração)."""
+        self.beginResetModel()
+        self._rows = []
+        try:
+            for r in FracoesRepo(pasta).all_ordered():
+                self._rows.append({
+                    "_id":        r["id"],
+                    "Fração":     str(r["fracao"] or "").strip(),
+                    "Andar":      str(r["andar"] or "").strip(),
+                    "Permilagem": float(r["permilagem"] or 0.0),
+                })
+        except Exception as e:
+            print(f"❌ FracoesTableModel.load() erro: {e}")
+        self._dirty = False
+        self.endResetModel()
+
+    def add_row(self) -> int:
+        new = {"_id": None, "Fração": "", "Andar": "", "Permilagem": 0.0, "": ""}
+        self.beginInsertRows(QModelIndex(), len(self._rows), len(self._rows))
+        self._rows.append(new)
+        self.endInsertRows()
+        self._dirty = True
+        return len(self._rows) - 1
+
+    def remove_row(self, row_index: int):
+        if 0 <= row_index < len(self._rows):
+            self.beginRemoveRows(QModelIndex(), row_index, row_index)
+            self._rows.pop(row_index)
+            self.endRemoveRows()
+            self._dirty = True
+
+    def save(self, pasta: Path) -> tuple[int, int, list[str]]:
+        """
+        Substitui TODAS as frações pelo conteúdo da grelha (FracoesRepo.replace_all).
+        Linhas sem Fração/Andar ou com Fração repetida são ignoradas (com aviso).
+        Devolve (gravadas, n_erros, mensagens_erro).
+        """
+        erros: list[str] = []
+        validas: list[dict] = []
+        vistas: set[str] = set()
+        for i, row in enumerate(self._rows):
+            fracao = str(row.get("Fração") or "").strip().upper()
+            andar = str(row.get("Andar") or "").strip()
+            if not fracao:
+                erros.append(f"Linha {i+1}: Fração vazia — ignorada")
+                continue
+            if not andar:
+                erros.append(f"Linha {i+1} ({fracao}): Andar vazio — ignorada")
+                continue
+            if fracao in vistas:
+                erros.append(f"Linha {i+1}: Fração '{fracao}' repetida — ignorada")
+                continue
+            vistas.add(fracao)
+            validas.append({"fracao": fracao, "andar": andar,
+                            "permilagem": float(row.get("Permilagem") or 0.0)})
+        gravadas = 0
+        try:
+            gravadas = FracoesRepo(pasta).replace_all(validas)
+        except Exception as e:
+            erros.append(f"Erro de DB: {e}")
+        else:
+            self._dirty = False
+        return gravadas, len(erros), erros
+
+
+class _PermilagemDelegate(QStyledItemDelegate):
+    """QDoubleSpinBox 0–1 com 3 casas decimais para a coluna Permilagem."""
+
+    def createEditor(self, parent, option, index):
+        sb = QDoubleSpinBox(parent)
+        sb.setRange(0.0, 1.0)
+        sb.setDecimals(3)
+        sb.setSingleStep(0.001)
+        return sb
+
+    def setEditorData(self, editor, index):
+        try:
+            editor.setValue(float(index.data(Qt.ItemDataRole.EditRole) or 0))
+        except (ValueError, TypeError):
+            editor.setValue(0.0)
+
+    def setModelData(self, editor, model, index):
+        editor.interpretText()
+        model.setData(index, editor.value(), Qt.ItemDataRole.EditRole)
+
+    def updateEditorGeometry(self, editor, option, index):
+        editor.setGeometry(option.rect)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 class ConfiguracoesWidget(QWidget):
     def __init__(self, pasta_dados=None, parent=None):
         super().__init__(parent)
@@ -589,13 +637,19 @@ class ConfiguracoesWidget(QWidget):
         self.tab_analisar = QWidget()
         self.tabs.addTab(self.tab_analisar, "Analisar CSV")
         self._setup_analisar_tab()
-        
+
         # Aba Configs
         self.tab_configs = QWidget()
         self.tabs.addTab(self.tab_configs, "Configs")
         self.model_configs = ConfigsTableModel()
         self._setup_tab(self.tab_configs, self.model_configs, is_configs=True)
 
+        # Aba Frações
+        self.tab_fracoes = QWidget()
+        self.tabs.addTab(self.tab_fracoes, "Frações")
+        self.model_fracoes = FracoesTableModel()
+        self._setup_fracoes_tab()
+        
         # Aba Regras
         self.tab_regras = QWidget()
         self.tabs.addTab(self.tab_regras, "Regras")
@@ -645,18 +699,12 @@ class ConfiguracoesWidget(QWidget):
         header = table.horizontalHeader()
         header.setStretchLastSection(False)
 
-        if is_configs:
-            # Configs: primeiras 4 fixas, última stretch
-            fixed_widths = [200, 310, 150, 110]
-            for i in range(4):
-                header.setSectionResizeMode(i, QHeaderView.ResizeMode.Fixed)
-                header.resizeSection(i, fixed_widths[i])
-            header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        else:
-            # Contas: primeira fixa, segunda stretch
-            header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-            header.resizeSection(0, 100)
-            header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        # Configs: primeiras 4 fixas, última stretch
+        fixed_widths = [200, 310, 150, 110]
+        for i in range(4):
+            header.setSectionResizeMode(i, QHeaderView.ResizeMode.Fixed)
+            header.resizeSection(i, fixed_widths[i])
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
 
         table.setAlternatingRowColors(True)
         table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
@@ -740,6 +788,111 @@ class ConfiguracoesWidget(QWidget):
         if reply == QMessageBox.StandardButton.Yes:
             self.model_configs.remove_row(row)
 
+    # ── Aba Frações ────────────────────────────────────────────────────────────
+
+    def _setup_fracoes_tab(self):
+        layout = QVBoxLayout(self.tab_fracoes)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(6)
+
+        btn_bar = QHBoxLayout()
+        btn_bar.setContentsMargins(4, 0, 4, 0)
+
+        btn_add = QPushButton("＋  Adicionar")
+        btn_add.setFixedHeight(34)
+        btn_add.setStyleSheet(
+            "QPushButton{background:#1976D2;color:white;font-weight:bold;"
+            "border:none;border-radius:4px;padding:0 12px;}"
+            "QPushButton:hover{background:#1565C0;}"
+        )
+        btn_add.clicked.connect(self._fracoes_add_row)
+
+        btn_del = QPushButton("✕  Apagar")
+        btn_del.setFixedHeight(34)
+        btn_del.setStyleSheet(
+            "QPushButton{background:#C62828;color:white;font-weight:bold;"
+            "border:none;border-radius:4px;padding:0 12px;}"
+            "QPushButton:hover{background:#B71C1C;}"
+        )
+        btn_del.clicked.connect(self._fracoes_del_row)
+        btn_bar.addWidget(btn_add)
+        btn_bar.addWidget(btn_del)
+        btn_bar.addStretch()
+        layout.addLayout(btn_bar)
+
+        self.table_fracoes = QTableView()
+        self.table_fracoes.setModel(self.model_fracoes)
+        self.table_fracoes.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+        self.table_fracoes.setEditTriggers(
+            QTableView.EditTrigger.DoubleClicked |
+            QTableView.EditTrigger.SelectedClicked
+        )
+        self.table_fracoes.setAlternatingRowColors(True)
+        self.table_fracoes.setStyleSheet("""
+            QTableView {
+                gridline-color: #C0C0C0;
+                border: 1px solid #C0C0C0;
+            }
+            QTableView::item { padding: 5px; }
+            QHeaderView::section {
+                background-color: #2F5597;
+                color: white;
+                font-weight: bold;
+                padding: 8px;
+                border: 1px solid #1F4587;
+            }
+        """)
+        self.table_fracoes.setItemDelegateForColumn(
+            _COL_PERM, _PermilagemDelegate(self.table_fracoes))
+
+        hdr = self.table_fracoes.horizontalHeader()
+        hdr.setStretchLastSection(False)
+        hdr.setSectionResizeMode(_COL_FRACAO, QHeaderView.ResizeMode.Fixed)
+        hdr.resizeSection(_COL_FRACAO, 110)
+        hdr.setSectionResizeMode(_COL_ANDAR, QHeaderView.ResizeMode.Fixed)
+        hdr.resizeSection(_COL_ANDAR, 130)
+        hdr.setSectionResizeMode(_COL_PERM, QHeaderView.ResizeMode.Fixed)
+        hdr.resizeSection(_COL_PERM, 130)
+        hdr.setSectionResizeMode(_COL_FILL, QHeaderView.ResizeMode.Stretch)
+        self.table_fracoes.keyPressEvent = self._fracoes_key_press
+        layout.addWidget(self.table_fracoes)
+
+        nota = QLabel(
+            "  ℹ️  Ins = nova linha  |  Del = apagar linha seleccionada  |  "
+            "Duplo-clique para editar  |  Use o botão «Gravar» (azul) para persistir"
+        )
+        nota.setStyleSheet("color:#666;font-style:italic;font-size:11px;padding:4px;")
+        layout.addWidget(nota)
+
+    def _fracoes_key_press(self, event):
+        if event.key() == Qt.Key.Key_Insert:
+            self._fracoes_add_row()
+        elif event.key() == Qt.Key.Key_Delete:
+            self._fracoes_del_row()
+        else:
+            QTableView.keyPressEvent(self.table_fracoes, event)
+
+    def _fracoes_add_row(self):
+        row = self.model_fracoes.add_row()
+        idx = self.model_fracoes.index(row, _COL_FRACAO)
+        self.table_fracoes.setCurrentIndex(idx)
+        self.table_fracoes.scrollToBottom()
+        self.table_fracoes.edit(idx)
+
+    def _fracoes_del_row(self):
+        indexes = self.table_fracoes.selectedIndexes()
+        if not indexes:
+            return
+        row = indexes[0].row()
+        nome = self.model_fracoes._rows[row].get("Fração") or f"linha {row+1}"
+        reply = QMessageBox.question(
+            self, "Confirmar",
+            f"Apagar a fração «{nome}»?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.model_fracoes.remove_row(row)
+
     # ── Aba Regras ─────────────────────────────────────────────────────────────
 
     def _setup_regras_tab(self):
@@ -768,20 +921,9 @@ class ConfiguracoesWidget(QWidget):
             "QPushButton:hover{background:#B71C1C;}"
         )
         btn_del.clicked.connect(self._regras_del_row)
-
-        btn_gravar = QPushButton("💾  Gravar Regras")
-        btn_gravar.setFixedHeight(34)
-        btn_gravar.setStyleSheet(
-            "QPushButton{background:#2E7D32;color:white;font-weight:bold;"
-            "border:none;border-radius:4px;padding:0 12px;}"
-            "QPushButton:hover{background:#1B5E20;}"
-        )
-        btn_gravar.clicked.connect(self._gravar_regras)
-
         btn_bar.addWidget(btn_add)
         btn_bar.addWidget(btn_del)
         btn_bar.addStretch()
-        btn_bar.addWidget(btn_gravar)
         layout.addLayout(btn_bar)
 
         # Tabela
@@ -835,7 +977,7 @@ class ConfiguracoesWidget(QWidget):
         # Nota de rodapé
         nota = QLabel(
             "  ℹ️  Ins = nova linha  |  Del = apagar linha seleccionada  |  "
-            "Duplo-clique para editar  |  'Gravar Regras' persiste na base de dados"
+            "Duplo-clique para editar  |  Use o botão «Gravar» (azul) para persistir"
         )
         nota.setStyleSheet("color:#666;font-style:italic;font-size:11px;padding:4px;")
         layout.addWidget(nota)
@@ -869,24 +1011,6 @@ class ConfiguracoesWidget(QWidget):
         )
         if reply == QMessageBox.StandardButton.Yes:
             self.model_regras.remove_row(row)
-
-    def _gravar_regras(self):
-        if not hasattr(self, "caminho_configs"):
-            QMessageBox.warning(self, "Sem dados", "Pasta de dados não definida.")
-            return
-        pasta = self.caminho_configs.parent
-        inseridas, n_erros, msgs = self.model_regras.save(pasta)
-        if msgs:
-            QMessageBox.warning(self, "Avisos",
-                                f"{inseridas} regra(s) gravada(s).\n\n" +
-                                "\n".join(msgs))
-        else:
-            QMessageBox.information(self, "Regras gravadas",
-                                    f"{inseridas} regra(s) gravada(s) com sucesso.")
-        self.status_label.setText(
-            f"✅ Regras: {inseridas} gravadas"
-            + (f", {n_erros} erro(s)" if n_erros else "")
-        )
 
     # ── Aba Analisar CSV ───────────────────────────────────────────────────────
     def _setup_analisar_tab(self):
@@ -988,13 +1112,11 @@ class ConfiguracoesWidget(QWidget):
 
     def analisar_csv(self):
         """Abre diálogo para selecionar CSV e executa análise"""
-        # Define o diretório inicial - usa a pasta de dados se disponível, caso contrário BASE_DIR
-        diretorio_inicial = str(BASE_DIR / self.pasta_dados) if self.pasta_dados else str(BASE_DIR)
-        
+        # Pasta default = import/ (padrão Commons / Bancos_Gui)
         csv_path, _ = QFileDialog.getOpenFileName(
             self,
             "Selecionar Ficheiro CSV",
-            diretorio_inicial,
+            str(IMPORT_DIR),
             "Ficheiros CSV (*.csv);;Todos os Ficheiros (*.*)"
         )
         
@@ -1006,7 +1128,8 @@ class ConfiguracoesWidget(QWidget):
         self.text_gravados.clear()
         
         # Caminho do Configs
-        configs_path = BASE_DIR / self.pasta_dados / "Configs"
+        from Commons import pasta_de_dados
+        configs_path = getattr(self, "pasta", None) or pasta_de_dados(self.pasta_dados)
         
         # Executar análise
         self.text_detectados.append("🔍 ANALISANDO FICHEIRO CSV...\n")
@@ -1030,7 +1153,7 @@ class ConfiguracoesWidget(QWidget):
                 self.text_gravados.append("=" * 60 + "\n")
                 
                 if existe_dados(configs_path):
-                    rows, _ = carregar_db(configs_path)
+                    rows = carregar_configs(configs_path)
                     importacao_params = []
                     for rec in rows:
                         categoria = str(rec.get('CATEGORIA', '')).strip().upper()
@@ -1057,9 +1180,8 @@ class ConfiguracoesWidget(QWidget):
                 self.carregar_dados()
                 
                 QMessageBox.information(
-                    self,
-                    "Sucesso",
-                    f"Análise concluída com sucesso!\n\n{message}"
+                    self, "Sucesso",
+                    f"<b>Análise concluída.</b><br><br>{message}"
                 )
             else:
                 self.text_detectados.append(f"\n❌ ERRO: {message}\n")
@@ -1080,9 +1202,12 @@ class ConfiguracoesWidget(QWidget):
 
     def recarregar_regras(self):
         """Recarrega só a grelha de Regras (ex.: após gravar quotas em Condóminos)."""
-        if not hasattr(self, "caminho_configs") or self.caminho_configs is None:
+        from Commons import pasta_de_dados
+        pasta = getattr(self, "pasta", None) or (
+            pasta_de_dados(self.pasta_dados) if getattr(self, "pasta_dados", None) else None
+        )
+        if pasta is None:
             return
-        pasta = self.caminho_configs.parent
         try:
             self.model_regras.load(pasta)
             n = self.model_regras.rowCount()
@@ -1091,15 +1216,20 @@ class ConfiguracoesWidget(QWidget):
             self.status_label.setText(f"⚠️ Regras: {e}")
 
     def set_pasta_dados(self, pasta_dados):
-
+        from Commons import pasta_de_dados
         self.pasta_dados = pasta_dados
-        self.caminho_configs = BASE_DIR / pasta_dados / "Configs"
+        self.pasta = pasta_de_dados(pasta_dados)
+        self.caminho_configs = self.pasta  # alias pasta real (sem …/Configs)
         self.carregar_dados()
 
     def carregar_dados(self):
+        from Commons import pasta_de_dados
+        pasta = getattr(self, "pasta", None) or (
+            pasta_de_dados(self.pasta_dados) if getattr(self, "pasta_dados", None) else None
+        )
         # Configs
-        if existe_dados(self.caminho_configs):
-            if self.model_configs.load_from_db(str(self.caminho_configs)):
+        if pasta and existe_dados(pasta):
+            if self.model_configs.load_from_db(str(pasta)):
                 self.status_label.setText(
                     f"✅ Configs carregadas ({self.model_configs.rowCount()} registos)")
             else:
@@ -1110,8 +1240,15 @@ class ConfiguracoesWidget(QWidget):
             self.model_configs.endResetModel()
             self.status_label.setText("📂 Configs não encontrado")
 
+        # Frações (tabela relacional)
+        if pasta is None:
+            pasta = self.caminho_configs if hasattr(self, "caminho_configs") else None
+        try:
+            self.model_fracoes.load(pasta)
+        except Exception as e:
+            self.status_label.setText(f"⚠️ Frações: {e}")
+
         # Regras (tabela relacional)
-        pasta = self.caminho_configs.parent
         try:
             self.model_regras.load(pasta)
             n = self.model_regras.rowCount()
@@ -1121,17 +1258,69 @@ class ConfiguracoesWidget(QWidget):
             self.status_label.setText(f"⚠️ Regras: {e}")
 
     def gravar_tabelas(self):
-        errors = []
+        """Grava Configs, Frações e Regras com o botão azul único."""
+        from Commons import pasta_de_dados
+        pasta = getattr(self, "pasta", None) or (
+            pasta_de_dados(self.pasta_dados) if getattr(self, "pasta_dados", None) else None
+        )
+        if pasta is None:
+            QMessageBox.warning(self, "Sem dados", "Pasta de dados não definida.")
+            return
 
-        if not self.caminho_configs.parent.exists():
-            self.caminho_configs.parent.mkdir(parents=True, exist_ok=True)
+        if not pasta.exists():
+            pasta.mkdir(parents=True, exist_ok=True)
 
+        erros_criticos: list[str] = []
+        avisos: list[str] = []
+        resumo: list[str] = []
+
+        # ── Configs ──────────────────────────────────────────────────────────
         if not self.model_configs.save_to_db(str(self.caminho_configs)):
-            errors.append("Configs")
-
-        if errors:
-            QMessageBox.critical(self, "Erro", f"Falha ao gravar: {', '.join(errors)}")
-            self.status_label.setText(f"❌ Erro ao gravar: {', '.join(errors)}")
+            erros_criticos.append("Configs")
         else:
-            QMessageBox.information(self, "Sucesso", "Tabelas gravadas com sucesso!")
-            self.status_label.setText("✅ Tabelas gravadas com sucesso!")
+            resumo.append(f"Configs: <b>{self.model_configs.rowCount()}</b> registo(s)</br>")
+
+        # ── Frações ──────────────────────────────────────────────────────────
+        try:
+            gravadas, n_erros, msgs = self.model_fracoes.save(pasta)
+            resumo.append(f"<br>Frações: <b>{gravadas}</b> gravada(s)</br>")
+            if msgs:
+                avisos.extend(msgs)
+            self.model_fracoes.load(pasta)
+        except Exception as e:
+            erros_criticos.append(f"Frações ({e})")
+
+        # ── Regras ───────────────────────────────────────────────────────────
+        try:
+            inseridas, n_erros, msgs = self.model_regras.save(pasta)
+            resumo.append(f"<br>Regras: <b>{inseridas}</b> gravada(s)</br>")
+            if msgs:
+                avisos.extend(msgs)
+        except Exception as e:
+            erros_criticos.append(f"Regras ({e})")
+
+        # ── Feedback ─────────────────────────────────────────────────────────
+        if erros_criticos:
+            QMessageBox.critical(
+                self, "Erro",
+                "Falha ao gravar:\n• " + "\n• ".join(erros_criticos)
+            )
+            self.status_label.setText(f"❌ Erro: {', '.join(erros_criticos)}")
+            return
+
+        texto_resumo = "\n".join(resumo)
+        if avisos:
+            QMessageBox.warning(
+                self, "Gravado com avisos",
+                f"{texto_resumo}\n\nAvisos:\n" + "\n".join(avisos)
+            )
+            self.status_label.setText(
+                f"✅ Gravado ({len(avisos)} aviso(s)): " + " | ".join(resumo)
+            )
+        else:
+            QMessageBox.information(
+                self, "Sucesso",
+                "<b>Tabelas gravadas com sucesso!</b><br><br>" + texto_resumo
+            )
+            
+            self.status_label.setText("✅ " + " | ".join(resumo))

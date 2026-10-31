@@ -7,12 +7,21 @@ from pathlib import Path
 from datetime import date
 from datetime import datetime
 from Logging_utils import ativar_logging
-from Database import carregar_db, salvar_db, existe_dados
+from Database import (
+    existe_dados,
+    resolver_pasta,
+    guardar_movimentos_fonte,
+    carregar_movimentos_fonte,
+    carregar_configs,
+    fonte_de_path,
+)
 
 # Importações compartilhadas
 from Commons import (
     BASE_DIR,
+    IMPORT_DIR,
     PASTA_CORRENTE,
+    db_path,
     clean_numeric,
     remover_acentos,
 )
@@ -26,25 +35,32 @@ logger = ativar_logging("bancos")
 
 def carregar_configuracoes_e_regras(config_db_path):
     """
-    V5: Carrega configurações (Configs) e regras de classificação (tabela regras).
-    - configs   : dict com parâmetros de IMPORTACAO, GERAL, FORMATACAO, QUOTAS
-    - condominos: lista de dicts com regras de condóminos (normal/extra preenchidos)
-    - regras    : lista de dicts com regras gerais (normal/extra vazios)
-    """
-    from Database import db_path, get_connection
+    Carrega configurações e dados para classificação do extracto.
 
-    pasta = Path(config_db_path).parent if config_db_path else PASTA_CORRENTE
+    - configs    : parâmetros IMPORTACAO / GERAL / FORMATACAO
+    - condominos : quotas e nomes a partir da tabela ``condominos``
+                   (``quota_normal`` / ``quota_extra`` — não adivinha valores)
+    - regras     : regras gerais (despesas/receitas não-quota) da tabela ``regras``
+    """
+    from Database import (
+        get_connection,
+        resolver_pasta,
+        condominos_para_categorizacao,
+        is_regra_condomino,
+    )
+
+    pasta = resolver_pasta(config_db_path)
 
     # ── 1. Configs (tudo excepto CLASSIFICACAO) ───────────────────────────────
     configs = {}
     try:
-        rows, _ = carregar_db(config_db_path)
+        rows = carregar_configs(config_db_path if config_db_path else pasta)
         for row in rows:
-            if str(row.get("CATEGORIA","")).strip() == "CLASSIFICACAO":
+            if str(row.get("CATEGORIA", "")).strip() == "CLASSIFICACAO":
                 continue
-            chave = str(row.get("CHAVE","")).strip()
-            valor_raw = str(row.get("VALOR","")).strip()
-            tipo  = str(row.get("TIPO","")).strip()
+            chave = str(row.get("CHAVE", "")).strip()
+            valor_raw = str(row.get("VALOR", "")).strip()
+            tipo = str(row.get("TIPO", "")).strip()
             if tipo == "Number":
                 try:
                     configs[chave] = float(valor_raw.replace(",", "."))
@@ -57,14 +73,15 @@ def carregar_configuracoes_e_regras(config_db_path):
     except Exception as e:
         print(f"Erro ao ler Configs: {e}")
 
-    # ── 2. Regras (tabela única V5) ───────────────────────────────────────────
-    condominos = []
-    regras_gerais = []
+    # ── 2. Condóminos + quotas (tabela condominos) ────────────────────────────
+    print("\n📋 Quotas lidas da tabela condominos:")
+    condominos = condominos_para_categorizacao(pasta)
 
+    # ── 3. Regras gerais (não-quota: limpeza, EDP, …) ─────────────────────────
+    regras_gerais = []
     try:
-        condo_db = db_path(pasta)
-        if not condo_db.exists():
-            print("⚠️  condominio.db não encontrada — sem regras")
+        if not db_path(pasta).exists():
+            print("⚠️  condominio.db não encontrada — sem regras gerais")
             return configs, condominos, regras_gerais
 
         with get_connection(pasta) as conn:
@@ -74,79 +91,46 @@ def carregar_configuracoes_e_regras(config_db_path):
 
         for r in rows_reg:
             pattern = (r["pattern"] or "").strip()
-            conta   = (r["conta"]   or "").strip()
-            classe  = (r["classe"]  or "DESPESA").strip().upper()
-            prio    = int(r["prioridade"] or 100)
-            normal  = r["normal"]
-            extra   = r["extra"]
+            conta = (r["conta"] or "").strip()
+            classe = (r["classe"] or "DESPESA").strip().upper()
+            prio = int(r["prioridade"] or 100)
+            normal = r["normal"]
+            extra = r["extra"]
 
             if not pattern:
                 continue
+            # Regras de quota de condómino: valores vêm de condominos, não daqui
+            if is_regra_condomino(classe, conta, normal, extra):
+                continue
 
-            # Condómino: RECEITA com normal (e tipicamente extra) preenchidos
-            # Regra geral com valor específico: DESPESA (ou outra) com normal
-            #   preenchido → usa USA_VALOR (ex.: Empregada / ATM = -60)
-            is_condomino = (
-                normal is not None
-                and classe == "RECEITA"
-                and (
-                    extra is not None
-                    or "quota" in conta.lower()
-                    or "frac" in conta.lower()
-                )
-            )
-
-            if is_condomino:
-                normal_f = float(normal)
-                extra_f  = float(extra) if extra is not None else 0.0
-                # Base sem prefixo "Quota … - " (a conta na DB já pode trazê-lo)
-                base = re.sub(
-                    r"^(Quota\s*(extra|total)?\s*-\s*)",
-                    "",
-                    conta,
-                    flags=re.IGNORECASE,
-                ).strip() or conta
-                condominos.append({
-                    "PREFIXO":         base,
-                    "NOME":            pattern.upper(),
-                    "NOME_ALTERNATIVO": "",
-                    "VALOR_NORMAL":    normal_f,
-                    "VALOR_EXTRA":     extra_f,
-                    "VALOR_TOTAL":     round(normal_f + extra_f, 2),
-                    "CONTA":           base,
-                })
-            elif normal is not None:
-                # Regra geral com valor específico (ex. Empregada ATM -60)
+            if normal is not None:
                 regras_gerais.append({
-                    "CHAVE_CONFIG":     f"REG_{conta}",
-                    "PATTERN":          pattern,
-                    "CLASSE":           classe,
-                    "CONTA":            conta,
-                    "PRIORIDADE":       prio,
-                    "USA_VALOR":        True,
+                    "CHAVE_CONFIG": f"REG_{conta}",
+                    "PATTERN": pattern,
+                    "CLASSE": classe,
+                    "CONTA": conta,
+                    "PRIORIDADE": prio,
+                    "USA_VALOR": True,
                     "VALOR_ESPECIFICO": float(normal),
                 })
             else:
-                # Regra geral (só pattern)
                 regras_gerais.append({
-                    "CHAVE_CONFIG":     f"REG_{conta}",
-                    "PATTERN":          pattern,
-                    "CLASSE":           classe,
-                    "CONTA":            conta,
-                    "PRIORIDADE":       prio,
-                    "USA_VALOR":        False,
+                    "CHAVE_CONFIG": f"REG_{conta}",
+                    "PATTERN": pattern,
+                    "CLASSE": classe,
+                    "CONTA": conta,
+                    "PRIORIDADE": prio,
+                    "USA_VALOR": False,
                     "VALOR_ESPECIFICO": None,
                 })
 
-        # Garantir ordem por prioridade (menor = mais prioritário)
         regras_gerais.sort(key=lambda x: x.get("PRIORIDADE", 100))
-        condominos.sort(key=lambda x: x.get("NOME", ""))
 
     except Exception as e:
         print(f"Erro ao carregar tabela regras: {e}")
 
-    print(f"-> Carregadas {len(condominos)} regras de condóminos")
-    print(f"-> Carregadas {len(regras_gerais)} regras gerais")
+    print(f"-> Condóminos com quotas para classificar: {len(condominos)}")
+    print(f"-> Regras gerais (não-quota): {len(regras_gerais)}")
 
     if "CSV_FIRST_ROW" not in configs:
         print("AVISO: 'CSV_FIRST_ROW' não encontrada em Configs.")
@@ -154,34 +138,12 @@ def carregar_configuracoes_e_regras(config_db_path):
     return configs, condominos, regras_gerais
 
 
-def extrair_nome_conta_padrao(prefixo):
-    nome = prefixo.replace('COND_', '').replace('_A', '').replace('_B', '')
-    
-    mapeamento = {
-        'RC_DTO': 'R/c Dto.',
-        'RC_ESQ': 'R/c Esq.',
-        '1DTO': '1º Dto.',
-        '1ESQ': '1º Esq.',
-        '2DTO': '2º Dto.',
-        '2ESQ': '2º Esq.'
-    }
-    
-    if nome in mapeamento:
-        return mapeamento[nome]
-    
-    nome_formatado = nome.replace('_', ' ').title()
-    return f"{nome_formatado}."
-
-
-def gerar_nome_conta_automatico(chave_regra):
-    nome = chave_regra.replace('REGRA_', '').replace('_', ' ')
-    palavras = nome.split()
-    return ' '.join(p.capitalize() for p in palavras if p)
-
-
 # ====================================================================
-# PARTE 2: LÓGICA DE CATEGORIZAÇÃO (VERSÃO MELHORADA)
+# PARTE 2: LÓGICA DE CATEGORIZAÇÃO
 # ====================================================================
+# Matemática de quotas: módulo partilhado Quotas.py (v1.01)
+from Quotas import classificar_valor_quota  # noqa: E402
+
 
 def aplicar_regras_categorizacao(df_dados, condominos, regras_gerais):
     if df_dados.empty:
@@ -216,56 +178,17 @@ def aplicar_regras_categorizacao(df_dados, condominos, regras_gerais):
             
             for idx in df_dados[mascara_final].index:
                 valor = abs(clean_numeric(df_dados.loc[idx, 'VALOR']))
-                
-                if abs(valor - cond['VALOR_NORMAL']) < 0.01:
-                    df_dados.loc[idx, 'CONTA'] = f"Quota - {cond['CONTA']}"
-                    df_dados.loc[idx, 'OBSERVACAO'] = ''
-                    
-                elif abs(valor - cond['VALOR_EXTRA']) < 0.01:
-                    df_dados.loc[idx, 'CONTA'] = f"Quota extra - {cond['CONTA']}"
-                    df_dados.loc[idx, 'OBSERVACAO'] = ''
-                    
-                elif abs(valor - cond['VALOR_TOTAL']) < 0.01:
-                    df_dados.loc[idx, 'CONTA'] = f"Quota TOTAL - {cond['CONTA']}"
-                    df_dados.loc[idx, 'OBSERVACAO'] = f"Normal({cond['VALOR_NORMAL']:.2f})+Extra({cond['VALOR_EXTRA']:.2f})"
-                    
-                
-                # NOVO: Verificar se é pagamento de múltiplos meses
-                elif cond['VALOR_TOTAL'] > 0:
-                    num_meses = valor / cond['VALOR_TOTAL']
-                    # Verificar se é número inteiro de meses (tolerância ±0.05)
-                    if abs(num_meses - round(num_meses)) < 0.05 and num_meses >= 2:
-                        num_meses_int = round(num_meses)
-                        total_normal = num_meses_int * cond['VALOR_NORMAL']
-                        total_extra = num_meses_int * cond['VALOR_EXTRA']
-                        # Verificar se soma bate (tolerância ±0.10€)
-                        if abs(valor - (total_normal + total_extra)) < 0.10:
-                            df_dados.loc[idx, 'CONTA'] = f"Quota TOTAL - {cond['CONTA']}"
-                            df_dados.loc[idx, 'OBSERVACAO'] = f"{num_meses_int}Normal({total_normal:.2f})+{num_meses_int}Extra({total_extra:.2f})"
-                        else:
-                            # Não bateu, usar classificação padrão
-                            if valor < cond['VALOR_EXTRA']:
-                                df_dados.loc[idx, 'CONTA'] = f"Quota - {cond['CONTA']}"
-                            else:
-                                df_dados.loc[idx, 'CONTA'] = f"Quota extra - {cond['CONTA']}"
-                            df_dados.loc[idx, 'OBSERVACAO'] = ''
-                    else:
-                        # Não é múltiplo inteiro, usar classificação padrão
-                        if valor < cond['VALOR_EXTRA']:
-                            df_dados.loc[idx, 'CONTA'] = f"Quota - {cond['CONTA']}"
-                        else:
-                            df_dados.loc[idx, 'CONTA'] = f"Quota extra - {cond['CONTA']}"
-                        df_dados.loc[idx, 'OBSERVACAO'] = ''
-                else:
-                    if valor < cond['VALOR_EXTRA']:
-                        df_dados.loc[idx, 'CONTA'] = f"Quota - {cond['CONTA']}"
-                    else:
-                        df_dados.loc[idx, 'CONTA'] = f"Quota extra - {cond['CONTA']}"
-                    df_dados.loc[idx, 'OBSERVACAO'] = ''
+                v_norm = float(cond.get('VALOR_NORMAL') or 0)
+                v_extra = float(cond.get('VALOR_EXTRA') or 0)
+                conta_base = cond['CONTA']
+                conta, obs = classificar_valor_quota(valor, v_norm, v_extra, conta_base)
+                df_dados.loc[idx, 'CONTA'] = conta
+                df_dados.loc[idx, 'OBSERVACAO'] = obs
     
     # 2. APLICAR REGRAS GERAIS
-    print(f"\nDEBUG: Aplicando {len(regras_gerais)} regras gerais...")
-    
+    if regras_gerais:
+        print(f"\n→ Aplicando {len(regras_gerais)} regras gerais...")
+
     for regra in regras_gerais:
         pattern = regra['PATTERN'].upper().strip()
         if not pattern:
@@ -276,36 +199,23 @@ def aplicar_regras_categorizacao(df_dados, condominos, regras_gerais):
         pattern_limpo = re.sub(r'[.,;:\-—–/\()\[\]"\'ºª]', ' ', pattern)
         pattern_limpo = re.sub(r'\s+', ' ', pattern_limpo).strip()
         
-        print(f"  Testando regra: '{regra['CHAVE_CONFIG']}'")
-        print(f"    Pattern original: '{regra['PATTERN']}'")
-        print(f"    Pattern limpo (sem acentos): '{pattern_limpo}'")
-        if regra['CLASSE']:
-            print(f"    Classe definida: '{regra['CLASSE']}'")
-        
         mascara = (df_dados['TIPO'] == '') & df_dados['DESCRICAO_LIMPA'].str.contains(pattern_limpo, case=False, na=False, regex=False)
         
         if regra['USA_VALOR'] and regra['VALOR_ESPECIFICO'] is not None:
-            print(f"    Exige valor: {regra['VALOR_ESPECIFICO']}")
             mascara_valor = df_dados['VALOR'].apply(lambda v: abs(clean_numeric(v) - regra['VALOR_ESPECIFICO']) < 0.01)
             mascara = mascara & mascara_valor
-        
-        num_matches = mascara.sum()
-        print(f"    Matches encontrados: {num_matches}")
         
         if mascara.any():
             if regra['CLASSE']:
                 df_dados.loc[mascara, 'TIPO'] = regra['CLASSE']
-                print(f"      ✓ Classificadas como {regra['CLASSE']} (campo CLASSE definido)")
+                print(f"  ✓ {int(mascara.sum())}× '{regra['PATTERN']}' → {regra['CLASSE']} / {regra.get('CONTA', '')}")
             else:
                 for idx in df_dados[mascara].index:
                     valor = clean_numeric(df_dados.loc[idx, 'VALOR'])
-                    descricao = df_dados.loc[idx, 'DESCRICAO'][:50]
                     if valor < 0:
                         df_dados.loc[idx, 'TIPO'] = 'DESPESA'
-                        print(f"      ✓ Classificada DESPESA (pelo valor): {descricao}... (valor: {valor})")
                     elif valor > 0:
                         df_dados.loc[idx, 'TIPO'] = 'RECEITA'
-                        print(f"      ✓ Classificada RECEITA (pelo valor): {descricao}... (valor: {valor})")
                     else:
                         df_dados.loc[idx, 'TIPO'] = ''
             
@@ -344,7 +254,9 @@ def carregar_parametros_importacao(configs):
     }
     
     parametros_opcionais = {
-        'CSV_AUTO_DETECT': 'False'
+        'CSV_AUTO_DETECT': 'False',
+        # Código de página do extracto (Configs.COD_PAGINA = cp1252 / ANSI)
+        'COD_PAGINA': 'cp1252',
     }
     
     params = {}
@@ -374,11 +286,25 @@ def carregar_parametros_importacao(configs):
         
         if chave == 'CSV_AUTO_DETECT':
             params[param_name] = str(valor).upper() in ('TRUE', '1', 'SIM')
+        elif chave == 'COD_PAGINA':
+            # Normaliza aliases comuns (ANSI, Windows-1252, etc.) para o nome usado pelo Python
+            aliases = {
+                'ansi': 'cp1252',
+                'windows-1252': 'cp1252',
+                'win1252': 'cp1252',
+                'latin1': 'latin-1',
+                'iso8859-1': 'latin-1',
+                'iso-8859-1': 'latin-1',
+                'utf8': 'utf-8',
+            }
+            enc = str(valor or valor_padrao).strip().lower()
+            params['cod_pagina'] = aliases.get(enc, enc) or 'cp1252'
         else:
             params[param_name] = valor
         
-        origem = "Configs" if configs.get(chave) else "valor padrão"
-        print(f"  ℹ️  {chave:<20} = {valor} ({origem})")
+        origem = "Configs" if configs.get(chave) is not None else "valor padrão"
+        shown = params.get(param_name, valor)
+        print(f"  ℹ️  {chave:<20} = {shown} ({origem})")
     
     print("─" * 80)
     
@@ -398,12 +324,18 @@ def _ler_movimentos_csv(csv_path, params):
     Lê o CSV e extrai as colunas DATA, DESCRICAO, VALOR e SALDO de acordo com
     os parâmetros de importação. Levanta exceção se o ficheiro não corresponder
     ao layout configurado (ex.: o banco alterou o formato).
+
+    Codificação: sempre a definida em Configs.COD_PAGINA (default cp1252).
     """
     print("\n📖 LENDO FICHEIRO CSV...")
 
+    # Encoding: sempre o configurado em Configs.COD_PAGINA
+    encoding = params['cod_pagina']
+    print(f"  ✓ Encoding (Configs COD_PAGINA): {encoding}")
+
     if params.get('csv_auto_detect'):
         print("  • Modo: Detecção automática do header")
-        with open(csv_path, 'r', encoding='cp1252') as f:
+        with open(csv_path, 'r', encoding=encoding, errors='replace') as f:
             lines = f.readlines()
             data_start_line = None
 
@@ -422,16 +354,22 @@ def _ler_movimentos_csv(csv_path, params):
         total_skiprows = int(params['csv_first_row']) - 1
         print(f"  ✓ Saltando {total_skiprows} linhas")
 
-    df_csv = pd.read_csv(
-        csv_path,
-        sep=params['csv_delimiter'],
-        skiprows=total_skiprows,
-        header=None,
-        encoding='cp1252',
-        decimal=params['csv_decimal'],
-        thousands=params['csv_thousands'],
-        keep_default_na=False
-    )
+    try:
+        df_csv = pd.read_csv(
+            csv_path,
+            sep=params['csv_delimiter'],
+            skiprows=total_skiprows,
+            header=None,
+            encoding=encoding,
+            decimal=params['csv_decimal'],
+            thousands=params['csv_thousands'] or None,
+            keep_default_na=False,
+        )
+    except UnicodeDecodeError as e:
+        raise ValueError(
+            f"Não foi possível ler o CSV com o encoding configurado "
+            f"(COD_PAGINA='{encoding}'). Verifica o valor em Configs. Erro: {e}"
+        )
 
     df_csv = df_csv.dropna(how='all')
     print(f"  ✓ {len(df_csv)} linhas lidas do CSV")
@@ -460,16 +398,19 @@ def _ler_movimentos_csv(csv_path, params):
     return df_dados
 
 
-def _detetar_params_importacao(csv_path):
+def _detetar_params_importacao(csv_path, cod_pagina):
     """
     Deteta automaticamente o formato do CSV (mesma lógica do 'Analisar CSV' em
     Configurações) e devolve os parâmetros no formato usado pela importação.
     Serve de rede de segurança quando os parâmetros guardados em Configs já não
     correspondem ao ficheiro (o banco alterou o layout).
+
+    O encoding usado é sempre o 'cod_pagina' já carregado de Configs.COD_PAGINA
+    — nunca se tenta adivinhar a codificação a partir do ficheiro.
     """
     try:
         from Analisar_csv import CSVAnalyzer
-        detetados = CSVAnalyzer(csv_path).analyze()
+        detetados = CSVAnalyzer(csv_path, encoding=cod_pagina).analyze()
     except Exception as e:
         print(f"  ✖ Deteção automática falhou: {e}")
         return None
@@ -489,6 +430,7 @@ def _detetar_params_importacao(csv_path):
             'col_descricao': int(detetados['COL_DESCRICAO']),
             'col_valor': int(detetados['COL_VALOR']),
             'col_saldo': int(detetados['COL_SALDO']),
+            'cod_pagina': cod_pagina,
         }
     except Exception as e:
         print(f"  ✖ Parâmetros detetados inválidos: {e}")
@@ -514,7 +456,7 @@ def importar_e_processar_bancos(csv_path, configs, output_db_path, condominos, r
         # importação (os parâmetros guardados não são alterados).
         print(f"  ✖ Leitura com os parâmetros de Configs falhou: {e}")
         print("  🔎 A detetar automaticamente o formato do ficheiro (fallback)...")
-        params_det = _detetar_params_importacao(csv_path)
+        params_det = _detetar_params_importacao(csv_path, params['cod_pagina'])
         if not params_det:
             print("  ✖ Não foi possível detetar automaticamente o formato do CSV.")
             raise
@@ -586,14 +528,13 @@ def importar_e_processar_bancos(csv_path, configs, output_db_path, condominos, r
     # =================================================================
     # GRAVAÇÃO — RECRIAÇÃO COMPLETA DO FICHEIRO VIA BRIDGE COMPATÍVEL
     # =================================================================
-    print("\n💾 GRAVANDO MOVIMENTOS BANCÁRIOS (SQLite)...")
+    print("\n💾 GRAVANDO MOVIMENTOS BANCÁRIOS (SQL / API canónica)...")
 
-    field_specs = 'DATA D; TIPO C(10); CONTA C(30); DESCRICAO C(30); VALOR N(10,2); SALDO N(10,2); OBSERVACAO C(32)'
     try:
-        # A escrita de DataFrame passa pelo materializador central do projeto:
-        ok = salvar_db(df_final, output_db_path, field_specs)
+        pasta = resolver_pasta(output_db_path)
+        ok = guardar_movimentos_fonte(df_final, pasta=pasta, fonte="bancos")
         if not ok:
-            raise RuntimeError('salvar_db falhou para Bancos')
+            raise RuntimeError('guardar_movimentos_fonte falhou para Bancos')
 
         print("\n🔄 SINCRONIZANDO MOVIMENTOS DE POUPANÇA PARA DPRAZO...")
         try:
@@ -655,7 +596,7 @@ def sincronizar_poupanca_dprazo(bancos_db='Bancos', dprazo_db='DPrazo'):
         return date(1900, 1, 1)
 
     def recalcular_saldos_dprazo_local(caminho_db):
-        rows, _ = carregar_db(caminho_db)
+        rows = carregar_movimentos_fonte(resolver_pasta(caminho_db), fonte_de_path(caminho_db))
         dados = []
         for rec in rows:
             dados.append({
@@ -683,8 +624,7 @@ def sincronizar_poupanca_dprazo(bancos_db='Bancos', dprazo_db='DPrazo'):
                 row['SALDO'] = round(saldo, 2)
 
         df = pd.DataFrame(dados)
-        specs = 'DATA D; TIPO C(10); CONTA C(30); DESCRICAO C(30); VALOR N(10,2); SALDO N(10,2); OBSERVACAO C(32)'
-        salvar_db(df, caminho_db, specs)
+        guardar_movimentos_fonte(df, pasta=resolver_pasta(caminho_db), fonte=fonte_de_path(caminho_db))
 
     # Resolve caminhos relativos contra a pasta do Bancos (e não contra o
     # diretório de trabalho atual). Assim o DPrazo fica sempre ao lado do
@@ -714,10 +654,11 @@ def sincronizar_poupanca_dprazo(bancos_db='Bancos', dprazo_db='DPrazo'):
                 'SALDO': 0.0,
                 'OBSERVACAO': ''
             }])
-            specs = 'DATA D; TIPO C(10); CONTA C(30); DESCRICAO C(30); VALOR N(10,2); SALDO N(10,2); OBSERVACAO C(32)'
-            ok = salvar_db(df_seed, str(dprazo_path), specs)
+            ok = guardar_movimentos_fonte(
+                df_seed, pasta=resolver_pasta(dprazo_path), fonte="dprazo"
+            )
             if not ok:
-                raise RuntimeError('salvar_db falhou ao recriar o seed de DPrazo')
+                raise RuntimeError('guardar_movimentos_fonte falhou ao recriar seed de DPrazo')
             print(f"  ✓ DPrazo criado com sucesso!")
         except Exception as e:
             print(f"  ❌ Erro ao criar DPrazo: {e}")
@@ -726,10 +667,10 @@ def sincronizar_poupanca_dprazo(bancos_db='Bancos', dprazo_db='DPrazo'):
     registos_adicionados = 0
     try:
         print(f"\n📖 Lendo {bancos_path.name}...")
-        rows_bancos, _ = carregar_db(bancos_path)
+        rows_bancos = carregar_movimentos_fonte(resolver_pasta(bancos_path), 'bancos')
         df_bancos = pd.DataFrame(rows_bancos, dtype=object)
 
-        rows_dprazo, _ = carregar_db(dprazo_path)
+        rows_dprazo = carregar_movimentos_fonte(resolver_pasta(dprazo_path), 'dprazo')
         df_dprazo = pd.DataFrame(rows_dprazo, dtype=object)
         if df_dprazo.empty:
             df_dprazo = pd.DataFrame([{
@@ -808,9 +749,10 @@ def sincronizar_poupanca_dprazo(bancos_db='Bancos', dprazo_db='DPrazo'):
         print(f"✅ {registos_adicionados} novos registos sincronizados para DPrazo")
 
         if registos_adicionados > 0:
-            specs = 'DATA D; TIPO C(10); CONTA C(30); DESCRICAO C(30); VALOR N(10,2); SALDO N(10,2); OBSERVACAO C(32)'
-            if not salvar_db(df_dprazo, str(dprazo_path), specs):
-                raise RuntimeError('salvar_db falhou para DPrazo')
+            if not guardar_movimentos_fonte(
+                df_dprazo, pasta=resolver_pasta(dprazo_path), fonte="dprazo"
+            ):
+                raise RuntimeError('guardar_movimentos_fonte falhou para DPrazo')
 
             print(f"\n🔍 Verificando saldos negativos...")
             dados_temp = []
@@ -857,9 +799,10 @@ def sincronizar_poupanca_dprazo(bancos_db='Bancos', dprazo_db='DPrazo'):
             if registos_juros:
                 for reg_juros in registos_juros:
                     df_dprazo = pd.concat([df_dprazo, pd.DataFrame([reg_juros])], ignore_index=True)
-                specs = 'DATA D; TIPO C(10); CONTA C(30); DESCRICAO C(30); VALOR N(10,2); SALDO N(10,2); OBSERVACAO C(32)'
-                if not salvar_db(df_dprazo, str(dprazo_path), specs):
-                    raise RuntimeError('salvar_db falhou ao guardar juros em DPrazo')
+                if not guardar_movimentos_fonte(
+                    df_dprazo, pasta=resolver_pasta(dprazo_path), fonte="dprazo"
+                ):
+                    raise RuntimeError('guardar_movimentos_fonte falhou ao guardar juros em DPrazo')
 
                 print(f"\n🔄 Recalculando saldos finais em {dprazo_path.name}...")
                 recalcular_saldos_dprazo_local(str(dprazo_path))

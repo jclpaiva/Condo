@@ -2,7 +2,7 @@
 Receitas_Gui.py - Widget de visualização de receitas (Quotas + Juros)
 Funcionalidades:
 - Preferência pelas views pivot relacionais (v_receitas_pivot)
-- Fallback para tabelas Receitas/Juros via bridge (condominio.db)
+- Fallback para tabelas Receitas/Juros via load_*_wide (condominio.db)
 - Botão Atualizar executa Receitas.py e sincroniza para condominio.db
 - Linha TOTAIS destacada, formatação de moeda, somente leitura
 """
@@ -16,11 +16,11 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QVariant
 from PyQt6.QtGui import QColor, QBrush, QFont
-from Commons import BASE_DIR, PASTA_CORRENTE, carregar_db, existe_dados
+from Commons import BASE_DIR, PASTA_CORRENTE, db_path
+from Database import existe_dados, load_receitas_wide, load_juros_wide, resolver_pasta
 try:
     from Database import (
         receitas as receitas_repo,
-        db_path,
         ensure_views_and_fts,
         ConfigsRepo,
         get_connection,
@@ -45,7 +45,7 @@ class ReceitasTableModel(QAbstractTableModel):
         if tipo == "JUROS":
             self.col_descricao = "JUROS"
         else:
-            self.col_descricao = "FRACCAO"
+            self.col_descricao = "FRAÇÃO"
         self._data = []
         if tipo == "JUROS":
             self.headers = [self.col_descricao] + self.MESES
@@ -119,7 +119,12 @@ class ReceitasTableModel(QAbstractTableModel):
                 return False
             ensure_views_and_fts(pasta)
             if ano is None:
-                ano = int(ConfigsRepo(pasta).get_value("GERAL", "ANO_EXERCICIO", 2026) or 2026)
+                from datetime import date as _date
+                _raw = ConfigsRepo(pasta).get_value("GERAL", "ANO_EXERCICIO", None)
+                try:
+                    ano = int(float(str(_raw).replace(",", "."))) if _raw not in (None, "") else _date.today().year
+                except (TypeError, ValueError):
+                    ano = _date.today().year
             tipo_quota = tipo_quota or ("NORMAL" if self.tipo == "QUOTAS" else "EXTRA")
             rows = receitas_repo(pasta).pivot(ano)
             meses_cols = ["JAN", "FEV", "MAR", "ABR", "MAI", "JUN",
@@ -128,7 +133,9 @@ class ReceitasTableModel(QAbstractTableModel):
                         "jul", "ago", "set", "out", "nov", "dez"]
 
             # Carregar saldos de receitas_resumo (por letra E por rótulo)
-            saldos = {}  # chave → (saldo_ant, saldo)  — chave pode ser letra ou rótulo
+            # e nomes dos condóminos (para display "andar — nome")
+            saldos = {}  # chave → (saldo_ant, saldo, qn, qe)
+            nomes = {}   # letra ou rótulo → nome do condómino
             mapa_label = {
                 "A": "R/c Esq.", "B": "R/c Dto.", "C": "1º Esq.",
                 "D": "1º Dto.", "E": "2º Esq.", "F": "2º Dto.",
@@ -138,7 +145,7 @@ class ReceitasTableModel(QAbstractTableModel):
                 with get_connection(pasta) as conn:
                     for rsum in conn.execute(
                         """SELECT c.fracao, rr.fracao_label, rr.saldo_ant, rr.saldo,
-                                  c.quota_normal, c.quota_extra
+                                  c.quota_normal, c.quota_extra, c.nome
                            FROM receitas_resumo rr
                            JOIN condominos c ON c.id = rr.condominio_id
                            WHERE rr.ano = ? AND UPPER(rr.tipo_quota) = ?""",
@@ -150,15 +157,34 @@ class ReceitasTableModel(QAbstractTableModel):
                         sf = float(rsum[3] or 0)
                         qn = float(rsum[4] or 0)
                         qe = float(rsum[5] or 0)
+                        nome = str(rsum[6] or "").strip()
                         entry = (sa, sf, qn, qe)
                         if letra:
                             saldos[letra] = entry
                             if letra in mapa_label:
                                 saldos[mapa_label[letra]] = entry
+                            if nome:
+                                nomes[letra] = nome
+                                if letra in mapa_label:
+                                    nomes[mapa_label[letra]] = nome
                         if label_r:
                             saldos[label_r] = entry
+                            if nome:
+                                nomes[label_r] = nome
+                    # Fallback: carregar nomes directamente de condominos
+                    if not nomes:
+                        for fr, nm in conn.execute(
+                            "SELECT fracao, nome FROM condominos "
+                            "WHERE nome IS NOT NULL AND TRIM(nome) != ''"
+                        ):
+                            letra = str(fr or "").strip()
+                            nome = str(nm or "").strip()
+                            if letra and nome:
+                                nomes[letra] = nome
+                                if letra in mapa_label:
+                                    nomes[mapa_label[letra]] = nome
             except Exception as e:
-                print(f"⚠️ Não foi possível carregar receitas_resumo: {e}")
+                print(f"⚠️ Não foi possível carregar receitas_resumo/nomes: {e}")
 
             totals = {m: 0.0 for m in meses_cols}
             totals["TOTAL"] = 0.0
@@ -170,7 +196,15 @@ class ReceitasTableModel(QAbstractTableModel):
                 if str(r["tipo_quota"]).upper() != tipo_quota:
                     continue
                 fracao = str(r["fracao"] or "").strip()
-                label = mapa_label.get(fracao, str(r["condominio"] or fracao))
+                label_base = mapa_label.get(fracao, fracao)
+                # Nome: prioritário do pivot (condominio), senão do mapa nomes (join condominos)
+                nome = str(r.get("condominio") or "").strip()
+                if not nome or nome == label_base:
+                    nome = nomes.get(fracao) or nomes.get(label_base) or ""
+                if nome and nome != label_base:
+                    label = f"{label_base} -> {nome}"
+                else:
+                    label = label_base
                 row = {self.col_descricao: label}
                 total = 0.0
                 for mk, col in zip(mes_keys, meses_cols):
@@ -181,19 +215,12 @@ class ReceitasTableModel(QAbstractTableModel):
                 total_pago = float(r["total"] or total)
                 row["TOTAL"] = total_pago
 
-                # SALDO_ANT do resumo; SALDO recalculado com a fórmula clássica
+                # SALDO_ANT e SALDO vêm sempre de receitas_resumo (fonte única,
+                # já gravada por Receitas.py) — nunca recalculados aqui, para
+                # não duplicar o cálculo e divergir do valor em BD.
                 entry = saldos.get(fracao) or saldos.get(label) or (0.0, 0.0, 0.0, 0.0)
                 sa = float(entry[0] or 0)
-                quota_mensal = float(entry[2] if tipo_quota == "NORMAL" else entry[3] or 0)
-                if quota_mensal <= 0:
-                    # tentar quota a partir do total esperado se não veio do join
-                    quota_mensal = 0.0
-                quota_anual = quota_mensal * 12
-                if quota_anual > 0 or abs(sa) > 0.0005:
-                    # SALDO = (Quota_Anual - Total_Pago) × -1 + Saldo_Anterior
-                    sf = (quota_anual - total_pago) * -1 + sa
-                else:
-                    sf = float(entry[1] or 0)
+                sf = float(entry[1] or 0)
 
                 row["SALDO_ANT"] = sa
                 row["SALDO"] = sf
@@ -218,8 +245,9 @@ class ReceitasTableModel(QAbstractTableModel):
             self.endResetModel()
             return False
 
-    def _obter_saldos_ant(self, caminho, tipo_quota_sql="NORMAL"):
-        """Lê SALDO_ANT de receitas_resumo (SQLite)."""
+    def _obter_saldos(self, caminho, tipo_quota_sql="NORMAL"):
+        """Lê SALDO_ANT e SALDO de receitas_resumo (SQLite) — fonte única,
+        sem recálculo: devolve {fracção: (saldo_ant, saldo)}."""
         saldos = {}
         pasta = Path(caminho).parent
         mapa_letra = {
@@ -246,7 +274,7 @@ class ReceitasTableModel(QAbstractTableModel):
                     with get_connection(pasta_db) as conn:
                         sql = """
                             SELECT COALESCE(NULLIF(TRIM(rr.fracao_label), ''), c.fracao),
-                                   rr.saldo_ant
+                                   rr.saldo_ant, rr.saldo
                             FROM receitas_resumo rr
                             JOIN condominos c ON c.id = rr.condominio_id
                             WHERE UPPER(TRIM(rr.tipo_quota)) = ?
@@ -255,18 +283,21 @@ class ReceitasTableModel(QAbstractTableModel):
                         if ano:
                             sql += " AND rr.ano = ?"
                             params.append(ano)
-                        for label, sa in conn.execute(sql, params):
+                        for label, sa, sf in conn.execute(sql, params):
                             fracao = _norm(label)
                             if not fracao:
                                 continue
                             try:
-                                val = float(sa or 0)
+                                sa_val = float(sa or 0)
                             except (TypeError, ValueError):
-                                val = 0.0
-                            if abs(val) > 0.0005:
-                                saldos[fracao] = val
+                                sa_val = 0.0
+                            try:
+                                sf_val = float(sf or 0)
+                            except (TypeError, ValueError):
+                                sf_val = 0.0
+                            saldos[fracao] = (sa_val, sf_val)
             except Exception as e:
-                print(f"⚠️ GUI: resumo SALDO_ANT: {e}")
+                print(f"⚠️ GUI: resumo SALDO_ANT/SALDO: {e}")
         return saldos
 
     def load_from_db(self, caminho):
@@ -280,40 +311,73 @@ class ReceitasTableModel(QAbstractTableModel):
             return False
 
         try:
-            rows, _ = carregar_db(caminho)
+            if self.tipo == "JUROS" or "Juros" in str(caminho):
+                rows, _ = load_juros_wide(resolver_pasta(caminho))
+            else:
+                tipo_sql_load = (
+                    "NORMAL"
+                    if self.tipo == "QUOTAS" or "ReceitasN" in str(caminho)
+                    else "EXTRA"
+                )
+                rows, _ = load_receitas_wide(tipo_sql_load, resolver_pasta(caminho))
             tipo_sql = "NORMAL" if self.tipo == "QUOTAS" else "EXTRA"
-            saldos_ant = {}
+            saldos_resumo = {}
             if self.tipo != "JUROS":
-                saldos_ant = self._obter_saldos_ant(caminho, tipo_sql)
+                saldos_resumo = self._obter_saldos(caminho, tipo_sql)
 
-            # Quotas mensais para recalcular SALDO (se disponível via resumo/condominos)
-            quotas_mensais = {}
+            # Nomes dos condóminos (para display "andar -> nome")
+            nomes = {}  # rótulo canónico → nome
             if self.tipo != "JUROS" and _HAS_RELATIONAL:
                 try:
                     pasta = Path(caminho).parent
                     if db_path(pasta).exists():
                         with get_connection(pasta) as conn:
-                            col = "quota_normal" if tipo_sql == "NORMAL" else "quota_extra"
                             mapa_letra = {
                                 "A": "R/c Esq.", "B": "R/c Dto.", "C": "1º Esq.",
                                 "D": "1º Dto.", "E": "2º Esq.", "F": "2º Dto.",
                             }
-                            for fr, q in conn.execute(
-                                f"SELECT fracao, {col} FROM condominos"
+                            for fr, nm in conn.execute(
+                                "SELECT fracao, nome FROM condominos"
                             ):
                                 label = mapa_letra.get(str(fr).strip(), str(fr).strip())
-                                quotas_mensais[label] = float(q or 0)
+                                nome = str(nm or "").strip()
+                                if nome:
+                                    nomes[label] = nome
+                                    letra = str(fr).strip()
+                                    if letra:
+                                        nomes[letra] = nome
                 except Exception:
                     pass
+
+            def _base_fracao(texto: str) -> str:
+                """Rótulo canónico da fracção, sem sufixo de nome ('2º Esq. -> …')."""
+                t = str(texto or "").strip()
+                for sep in (" -> ", " — ", " - "):
+                    if sep in t:
+                        t = t.split(sep, 1)[0].strip()
+                        break
+                return t
 
             for rec in rows:
                 if self.tipo == "JUROS":
                     descricao = str(rec.get("JUROS", "")).strip()
+                    base = descricao
                 else:
                     descricao = str(rec.get("FRACCAO", "")).strip()
+                    base = _base_fracao(descricao)
 
                 if not descricao:
                     continue
+
+                # TOTAIS vem no fim como soma das linhas — não aplicar fórmula de fracção
+                if descricao.upper() == "TOTAIS" or base.upper() == "TOTAIS":
+                    continue
+
+                # Acrescentar nome do condómino ao rótulo da fracção (se ainda não estiver)
+                if self.tipo != "JUROS" and nomes:
+                    nome = nomes.get(base) or nomes.get(descricao) or ""
+                    if nome and nome not in descricao:
+                        descricao = f"{base} -> {nome}"
 
                 row = {self.col_descricao: descricao}
 
@@ -326,24 +390,34 @@ class ReceitasTableModel(QAbstractTableModel):
                 row["TOTAL"] = total_pago
 
                 if self.tipo != "JUROS":
-                    # Preferir SALDO_ANT de receitas_resumo; senão o da tabela
+                    # SALDO_ANT e SALDO vêm sempre de receitas_resumo (fonte
+                    # única, já gravada por Receitas.py); a tabela plana só
+                    # serve de fallback se a fracção não constar do resumo.
+                    # Lookup SEMPRE pela fracção base ("2º Esq."), nunca pelo
+                    # rótulo com nome — senão a chave falha e cai-se no fallback.
                     sa_tabela = float(rec.get("SALDO_ANT", 0.0) or 0.0)
-                    sa = saldos_ant.get(descricao, sa_tabela)
-                    if abs(sa) < 0.0005 and abs(sa_tabela) > 0.0005:
-                        sa = sa_tabela
-
-                    q_mensal = quotas_mensais.get(descricao, 0.0)
-                    q_anual = q_mensal * 12
-                    # SALDO = (Quota_Anual - Total_Pago) × -1 + Saldo_Anterior
-                    if q_anual > 0 or abs(sa) > 0.0005:
-                        sf = (q_anual - total_pago) * -1 + sa
+                    sf_tabela = float(rec.get("SALDO", 0.0) or 0.0)
+                    entry = saldos_resumo.get(base)
+                    if entry is not None:
+                        sa, sf = entry
                     else:
-                        sf = float(rec.get("SALDO", 0.0) or 0.0)
+                        sa, sf = sa_tabela, sf_tabela
 
                     row["SALDO_ANT"] = sa
                     row["SALDO"] = sf
 
                 self._data.append(row)
+
+            # Linha TOTAIS = soma de todas as colunas numéricas (incl. SALDO)
+            if self._data:
+                tot = {self.col_descricao: "TOTAIS"}
+                numeric_cols = ["JAN", "FEV", "MAR", "ABR", "MAI", "JUN",
+                                "JUL", "AGO", "SET", "OUT", "NOV", "DEZ", "TOTAL"]
+                if self.tipo != "JUROS":
+                    numeric_cols = ["SALDO_ANT"] + numeric_cols + ["SALDO"]
+                for col in numeric_cols:
+                    tot[col] = sum(float(r.get(col, 0) or 0) for r in self._data)
+                self._data.append(tot)
 
             self.endResetModel()
             return True
@@ -491,10 +565,13 @@ class ReceitasWidget(QWidget):
             header.resizeSection(idx, total_width)
 
     def set_pasta_dados(self, pasta_dados):
+        from Commons import pasta_de_dados
         self.pasta_dados = pasta_dados
-        self.caminho_receitas_n = BASE_DIR / pasta_dados / "ReceitasN"
-        self.caminho_receitas_e = BASE_DIR / pasta_dados / "ReceitasE"
-        self.caminho_juros = BASE_DIR / pasta_dados / "Juros"
+        self.pasta = pasta_de_dados(pasta_dados)
+        # Aliases legados → pasta real (sem …/ReceitasN etc.)
+        self.caminho_receitas_n = self.pasta
+        self.caminho_receitas_e = self.pasta
+        self.caminho_juros = self.pasta
         self.carregar_dados()
         
     def carregar_dados(self, preferir_planas=False):
@@ -503,7 +580,10 @@ class ReceitasWidget(QWidget):
         preferir_planas=True  → usa tabelas ReceitasN/E (após Atualizar, têm saldos corretos)
         preferir_planas=False → tenta pivot relacional (com saldos de receitas_resumo)
         """
-        pasta = BASE_DIR / self.pasta_dados if self.pasta_dados else PASTA_CORRENTE
+        from Commons import pasta_de_dados
+        pasta = getattr(self, "pasta", None) or (
+            pasta_de_dados(self.pasta_dados) if self.pasta_dados else PASTA_CORRENTE
+        )
         loaded_from = "legado"
 
         def _tem_saldos(model):
@@ -575,7 +655,8 @@ class ReceitasWidget(QWidget):
             QMessageBox.warning(self, "Aviso", "Pasta de dados não definida.")
             return
 
-        pasta_trabalho = BASE_DIR / self.pasta_dados
+        from Commons import pasta_de_dados
+        pasta_trabalho = getattr(self, "pasta", None) or pasta_de_dados(self.pasta_dados)
         if not pasta_trabalho.exists():
             QMessageBox.critical(self, "Erro", f"Pasta de trabalho não existe: {pasta_trabalho}")
             return
@@ -597,12 +678,11 @@ class ReceitasWidget(QWidget):
             self.status_label.setText(f"✅ Receitas atualizadas! (N:{total_n} E:{total_e} J:{total_j})")
             
             QMessageBox.information(
-                self,
-                "Sucesso",
-                f"Receitas atualizadas com sucesso!\n\n"
-                f"Quotas Normais: {total_n} registos\n"
-                f"Quotas Extras: {total_e} registos\n"
-                f"Juros: {total_j} registos"
+                self, "Sucesso",
+                f"<b>Receitas atualizadas com sucesso!</b>.<br><br>"
+                f"Quotas Normais: <b>{total_n}</b> registos<br>"
+                f"Quotas Extras: <b>{total_e}</b> registos<br>"
+                f"Juros: <b>{total_j}</b> registos"
             )
 
         except Exception as e:

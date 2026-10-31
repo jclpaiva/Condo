@@ -9,7 +9,7 @@ Contém:
 - Camada de dados 100% relacional (condominio.db)
 
 API de compatibilidade mantida:
-  carregar_db / salvar_db / existe_dados / carregar_contas / ...
+  API canónica reexportada de Database (sem bridge legado)
 passam a usar exclusivamente condominio.db (sem fallback para dados.sqlite).
 """
 
@@ -60,15 +60,87 @@ def get_base_dir():
         # Rodando como script Python
         return Path(__file__).resolve().parent
 
+# Versão da aplicação
+# 1.00 — produção testada (ciclo completo OK)
+# 1.01 — matemática de quotas extraída para Quotas.py (testes de regressão)
+APP_VERSION = "1.01"
+
 # Paths
 BASE_DIR = get_base_dir()
+IMPORT_DIR = BASE_DIR / "import"
 ICONS_DIR = BASE_DIR / "icons"
 FOTOS_DIR = BASE_DIR / "fotos"
 DOCS_DIR = BASE_DIR / "docs"
 FONTS_DIR = BASE_DIR / "fonts"
 PASTA_CORRENTE = BASE_DIR / "corrente"
 PASTA_HISTORICO = BASE_DIR / "historico"
-# Database (100% SQLite)
+EXPORT_DIR = BASE_DIR / "export"
+DB_NAME = "condominio.db"
+DB_EXPORT_NAME = "condo42.db"
+
+
+def db_path(pasta: Path | None = None) -> Path:
+    """Caminho do ficheiro de base de dados na pasta indicada (default = corrente)."""
+    return (pasta or PASTA_CORRENTE) / DB_NAME
+
+
+def db_export_path() -> Path:
+    """Caminho da mini bdados exportada (condo42.db), usada pelo site web."""
+    return EXPORT_DIR / DB_EXPORT_NAME
+
+
+def pasta_de_dados(pasta_dados=None) -> Path:
+    """
+    Resolve o identificador usado pelas GUIs para a pasta real com condominio.db.
+
+    Aceita: None, ``"corrente"``, ``"historico/2025"``, Path absoluto, …
+    **Não** construa paths legados do tipo ``…/Bancos`` ou ``…/Configs`` —
+    passe só a pasta lógica; ``resolver_pasta`` trata o resto.
+    """
+    # Import local evita ciclo Commons ↔ Database no carregamento do módulo
+    from Database import resolver_pasta
+    if pasta_dados is None or str(pasta_dados).strip() == "":
+        return resolver_pasta(None)
+    p = Path(pasta_dados)
+    if not p.is_absolute():
+        return resolver_pasta(BASE_DIR / p)
+    return resolver_pasta(p)
+
+
+def pasta_e_corrente(pasta_dados=None) -> bool:
+    """True se a pasta de dados corresponde ao exercício **corrente** (não histórico).
+
+    Usado para desativar operações só válidas no ano em curso (ex.: WhatsApp
+    de cobrança de quotas em atraso).
+
+    Critérios (qualquer um basta para considerar histórico → False):
+      - o path contém ``historico`` (ex.: ``historico/2025``)
+      - o path resolvido não é ``PASTA_CORRENTE``
+    """
+    if pasta_dados is None or str(pasta_dados).strip() in ("", "corrente"):
+        return True
+    s = str(pasta_dados).replace("\\", "/").strip().lower()
+    if "historico" in s.split("/"):
+        return False
+    if s == "corrente" or s.endswith("/corrente"):
+        return True
+    try:
+        resolved = pasta_de_dados(pasta_dados).resolve()
+        corrente = PASTA_CORRENTE.resolve()
+        if resolved == corrente:
+            return True
+        # pasta resolvida dentro de historico/
+        hist = PASTA_HISTORICO.resolve()
+        try:
+            resolved.relative_to(hist)
+            return False
+        except ValueError:
+            pass
+        return resolved.name.lower() == "corrente"
+    except Exception:
+        return False
+
+
 # Outros
 LOGGING_LEVEL = 'INFO'
 
@@ -269,94 +341,67 @@ from Database import (  # noqa: E402
     existe_dados,
     validar_db_existe,
     criar_backup_db,
-    carregar_db,
-    salvar_db,
     carregar_contas,
-    load_table,
-    save_table,
-    has_data,
+    # API canónica
+    resolver_pasta,
+    db_existe,
+    quotas_por_fracao,
+    regras_condominos_lista,
+    movimentos_dataframe,
+    aglutinar_movimentos,
+    carregar_movimentos_fonte,
+    guardar_movimentos_fonte,
+    carregar_condominos,
+    guardar_condominos,
+    carregar_configs,
+    guardar_configs,
+    ano_exercicio as _ano_exercicio_db,
+    configs as configs_repo,
 )
 
 
-def calcular_numero_admin(configs_db=None):
+def calcular_numero_admin(pasta_ou_configs=None):
     """
     Calcula o número da administração corrente.
-    Lê ANO_EXERCICIO e NUMERO_ADMINISTRACAO da tabela Configs (condominio.db).
+    Lê ANO_EXERCICIO e NUMERO_ADMINISTRACAO via ConfigsRepo (SQL).
     Fórmula: numero_admin = ano_exercicio - numero_administracao + 1
 
-    configs_db: caminho opcional. Se None, usa corrente/Configs.
+    pasta_ou_configs: pasta de dados, path .../Configs, ou None (= corrente).
     """
-    ano_exercicio = None
-    numero_administracao = None
-
     try:
-        if configs_db is None:
-            path = PASTA_CORRENTE / "Configs"
-        else:
-            path = Path(configs_db)
-            if not path.is_absolute():
-                path = BASE_DIR / path
-
-        rows, _ = carregar_db(path)
-        df = pd.DataFrame(rows, dtype=object)
-        if not df.empty:
-            mascara_ano = (df['CATEGORIA'].astype(str).str.strip().str.upper() == 'GERAL') & (df['CHAVE'].astype(str).str.strip().str.upper() == 'ANO_EXERCICIO')
-            if mascara_ano.any():
-                valor_ano = df[mascara_ano].iloc[0]['VALOR']
-                ano_exercicio = int(clean_numeric(valor_ano))
-                print(f"  ✓ Ano exercício lido de Configs: {ano_exercicio}")
-
-            mascara_num = (df['CATEGORIA'].astype(str).str.strip().str.upper() == 'GERAL') & (df['CHAVE'].astype(str).str.strip().str.upper() == 'NUMERO_ADMINISTRACAO')
-            if mascara_num.any():
-                valor_num = df[mascara_num].iloc[0]['VALOR']
-                numero_administracao = int(clean_numeric(valor_num))
-                print(f"  ✓ Ano da 1ª administração lido de Configs: {numero_administracao}")
-
-        if ano_exercicio is None or numero_administracao is None:
-            raise ValueError("Não foi possível ler ANO_EXERCICIO ou NUMERO_ADMINISTRACAO")
-
-    except FileNotFoundError:
-        print(f"  ⚠️  Configs não encontrado. Usando valores padrão.")
-        ano_exercicio = 2025
-        numero_administracao = 2005
+        pasta = resolver_pasta(pasta_ou_configs)
+        repo = configs_repo(pasta)
+        ano_raw = repo.get_value("GERAL", "ANO_EXERCICIO", None)
+        num_raw = repo.get_value("GERAL", "NUMERO_ADMINISTRACAO", None)
+        if ano_raw is None or num_raw is None:
+            raise ValueError("ANO_EXERCICIO ou NUMERO_ADMINISTRACAO em falta")
+        ano_exercicio = int(clean_numeric(ano_raw))
+        numero_administracao = int(clean_numeric(num_raw))
+        print(f"  ✓ Ano exercício lido de Configs: {ano_exercicio}")
+        print(f"  ✓ Ano da 1ª administração lido de Configs: {numero_administracao}")
     except Exception as e:
         print(f"  ⚠️  Erro ao ler Configs: {e}. Usando valores padrão.")
-        ano_exercicio = 2025
+        ano_exercicio = datetime.date.today().year
         numero_administracao = 2005
 
     numero_admin = ano_exercicio - numero_administracao + 1
-    print(f"  ✓ Administração corrente calculada: {numero_admin}ª ({ano_exercicio} - {numero_administracao} + 1)")
-
+    print(
+        f"  ✓ Administração corrente calculada: {numero_admin}ª "
+        f"({ano_exercicio} - {numero_administracao} + 1)"
+    )
     return numero_admin
 
-def obter_ano_exercicio(pasta_dados='corrente'):
+
+def obter_ano_exercicio(pasta_dados="corrente"):
     """
-    Obtém o ano do exercício a partir da tabela Configs (condominio.db).
+    Obtém o ano do exercício (API canónica → ConfigsRepo).
+    Aceita pasta de dados ou path legado (.../Configs, .../Bancos).
     """
     from datetime import datetime
-
     try:
-        if isinstance(pasta_dados, str) and not pasta_dados.startswith('/') and not ':' in pasta_dados:
-            configs_path = BASE_DIR / pasta_dados / 'Configs'
-        else:
-            configs_path = Path(pasta_dados) / 'Configs' if Path(pasta_dados).is_dir() else Path(pasta_dados).parent / 'Configs'
-
-        if not existe_dados(configs_path):
-            print(f"  ⚠️ Configs não encontrado em {configs_path}, usando ano atual")
-            return datetime.now().year
-
-        rows, _ = carregar_db(configs_path)
-        df = pd.DataFrame(rows, dtype=object)
-        mascara = (df['CATEGORIA'].astype(str).str.strip().str.upper() == 'GERAL') & (df['CHAVE'].astype(str).str.strip().str.upper() == 'ANO_EXERCICIO')
-        if mascara.any():
-            valor = df[mascara].iloc[0]['VALOR']
-            return int(clean_numeric(valor))
-
-        print(f"  ⚠️ ANO_EXERCICIO não encontrado em Configs, usando ano atual")
-        return datetime.now().year
-
+        return int(_ano_exercicio_db(pasta_dados))
     except Exception as e:
-        print(f"  ⚠️ Erro ao ler ANO_EXERCICIO de Configs: {e}, usando ano atual")
+        print(f"  ⚠️ Erro ao ler ANO_EXERCICIO: {e}, usando ano atual")
         return datetime.now().year
 
 def registar_fonte():
@@ -379,7 +424,7 @@ def registar_fonte():
 # INICIALIZAÇÃO
 # ====================================================================
 # Criar diretórios se não existirem
-for directory in [FOTOS_DIR, DOCS_DIR]:  # ✅ DOCS_DIR incluído
+for directory in [FOTOS_DIR, DOCS_DIR, EXPORT_DIR]:  # ✅ EXPORT_DIR incluído
     if not directory.exists():
         directory.mkdir(parents=True, exist_ok=True)
         print(f"📁 Diretório criado: {directory}")

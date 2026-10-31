@@ -33,8 +33,8 @@ except ImportError:
 CONDOMINIO_NOME = "Condomínio Av. Sto. António, 42"
 CONDOMINIO_NIF  = "901579220"
 
-# Mapeamento ANDAR → FRAÇÃO (letra)
-ANDAR_PARA_FRACAO = {
+# Mapeamento ANDAR → FRAÇÃO (letra) — fallback se tabela fracoes vazia
+_ANDAR_PARA_FRACAO_FALLBACK = {
     "R/c Esq.":  "A",
     "R/c Dto.":  "B",
     "1º Esq.":   "C",
@@ -42,6 +42,22 @@ ANDAR_PARA_FRACAO = {
     "2º Esq.":   "E",
     "2º Dto.":   "F",
 }
+
+
+def _andar_para_fracao_map(pasta=None) -> dict[str, str]:
+    """Inverso de mapas_fracoes (andar → letra), com fallback estático."""
+    try:
+        from Database import mapas_fracoes
+        letra_para_label, _ = mapas_fracoes(pasta)
+        if letra_para_label:
+            return {v: k for k, v in letra_para_label.items()}
+    except Exception:
+        pass
+    return dict(_ANDAR_PARA_FRACAO_FALLBACK)
+
+
+# Compatibilidade com imports existentes (Imprimir_Recibos, etc.)
+ANDAR_PARA_FRACAO = _ANDAR_PARA_FRACAO_FALLBACK
 
 # ---------------------------------------------------------------------------
 # Dimensões do talão

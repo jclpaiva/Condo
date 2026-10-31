@@ -3,7 +3,7 @@ Database.py – Camada de dados 100% SQLite relacional (sem qualquer dependênci
 
 - Schema tipado, com PRIMARY KEYs, FOREIGN KEYs e índices
 - Repositórios simples para CRUD e pesquisas
-- Substitui completamente o bridge antigo (carregar_db / salvar_db)
+- API canónica SQLite (sem bridge DBF/path-based)
 """
 
 from __future__ import annotations
@@ -19,26 +19,9 @@ try:
 except ImportError:
     pd = None  # type: ignore
 
-# ---------------------------------------------------------------------------
-# Caminhos
-# ---------------------------------------------------------------------------
-
-def get_base_dir() -> Path:
-    import sys
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent.parent
-    return Path(__file__).resolve().parent
-
-
-BASE_DIR = get_base_dir()
-PASTA_CORRENTE = BASE_DIR / "corrente"
-PASTA_HISTORICO = BASE_DIR / "historico"
-DB_NAME = "condominio.db"
-
-
-def db_path(pasta: Path | None = None) -> Path:
-    """Caminho do ficheiro de base de dados na pasta indicada (default = corrente)."""
-    return (pasta or PASTA_CORRENTE) / DB_NAME
+# Caminhos: BASE_DIR, PASTA_CORRENTE, PASTA_HISTORICO, DB_NAME, db_path
+# são definidos em Commons.py e importados no final deste módulo
+# (evita import circular Commons ↔ Database).
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +36,16 @@ def get_connection(pasta: Path | None = None, *, row_factory: bool = True):
     if row_factory:
         conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = DELETE")
+    # WAL quando o filesystem o suporta; senão DELETE (ex.: alguns mounts de rede)
+    try:
+        mode = conn.execute("PRAGMA journal_mode = WAL").fetchone()
+        if mode and str(mode[0]).lower() != "wal":
+            conn.execute("PRAGMA journal_mode = DELETE")
+    except sqlite3.Error:
+        try:
+            conn.execute("PRAGMA journal_mode = DELETE")
+        except sqlite3.Error:
+            pass
     try:
         yield conn
         conn.commit()
@@ -63,6 +55,43 @@ def get_connection(pasta: Path | None = None, *, row_factory: bool = True):
     finally:
         conn.close()
 
+@contextmanager
+def db_transaction(pasta: Path | None = None, *, row_factory: bool = True):
+    """
+    Context manager para uma transação explícita e partilhável.
+
+    Uso típico no encerramento de ano (ou qualquer operação multi-passo):
+
+        with db_transaction(pasta) as conn:
+            save_xxx(..., conn=conn)
+            guardar_movimentos_fonte(..., conn=conn)
+            # commit automático no fim do bloco se não houver exceção
+            # rollback automático se ocorrer qualquer exceção
+    """
+    path = db_path(pasta)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path), detect_types=sqlite3.PARSE_DECLTYPES)
+    if row_factory:
+        conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        mode = conn.execute("PRAGMA journal_mode = WAL").fetchone()
+        if mode and str(mode[0]).lower() != "wal":
+            conn.execute("PRAGMA journal_mode = DELETE")
+    except sqlite3.Error:
+        try:
+            conn.execute("PRAGMA journal_mode = DELETE")
+        except sqlite3.Error:
+            pass
+    try:
+        conn.execute("BEGIN")
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 # ---------------------------------------------------------------------------
 # Schema completo
@@ -89,8 +118,23 @@ CREATE TABLE IF NOT EXISTS condominos (
     foto            TEXT,
     ativo           INTEGER NOT NULL DEFAULT 1,       -- 1 = recebe emails
     admin           INTEGER NOT NULL DEFAULT 0,
+    cc_numero       TEXT,                             -- Cartão de Cidadão n.º (NIC + check + versão)
+    cc_validade     TEXT,                             -- Data validade CC (dd-mm-yyyy)
+    nif             TEXT,                             -- NIF (9 dígitos)
     created_at      TEXT    DEFAULT (datetime('now')),
     updated_at      TEXT
+);
+
+-- ============================================================
+--  Frações (andar e permilagem de cada fração)
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS fracoes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    fracao      TEXT    NOT NULL UNIQUE,
+    andar       TEXT    NOT NULL,
+    permilagem  REAL    NOT NULL,
+    created_at  TEXT    DEFAULT (datetime('now'))
 );
 
 -- ============================================================
@@ -244,12 +288,28 @@ CREATE TABLE IF NOT EXISTS juros (
 );
 """
 
-
 def create_schema(pasta: Path | None = None) -> None:
     """Cria (ou actualiza) o schema completo."""
     with get_connection(pasta, row_factory=False) as conn:
         conn.executescript(SCHEMA_SQL)
+        _ensure_condominos_cc_columns(conn)
 
+
+def _ensure_condominos_cc_columns(conn) -> None:
+    """Adiciona cc_numero / cc_validade / nif se a tabela já existia sem elas."""
+    try:
+        existentes = {
+            row[1] for row in conn.execute("PRAGMA table_info(condominos)").fetchall()
+        }
+    except Exception:
+        return
+    for col, tipo in (
+        ("cc_numero", "TEXT"),
+        ("cc_validade", "TEXT"),
+        ("nif", "TEXT"),
+    ):
+        if col not in existentes:
+            conn.execute(f"ALTER TABLE condominos ADD COLUMN {col} {tipo}")
 
 # ---------------------------------------------------------------------------
 # Helpers de conversão de tipos
@@ -266,19 +326,32 @@ def _to_float(val: Any) -> float:
     except ValueError:
         return 0.0
 
-
 def _to_int(val: Any, default: int = 0) -> int:
     try:
         return int(float(str(val).replace(",", ".")))
     except (ValueError, TypeError):
         return default
 
+def _normalizar_admin(val: Any) -> int:
+    """Normaliza o campo admin: 1 = atual, -1 = cessante, 0 = outros."""
+    if val is True or val in (1, "1", ".T.", "T", "t", "True", "true"):
+        return 1
+    if val in (-1, "-1"):
+        return -1
+    try:
+        n = int(float(str(val).strip()))
+        if n == 1:
+            return 1
+        if n == -1:
+            return -1
+    except (ValueError, TypeError):
+        pass
+    return 0
 
 def _to_str(val: Any) -> str:
     if val is None:
         return ""
     return str(val).strip()
-
 
 def _normalize_date(val: Any) -> str:
     """Converte várias formas de data para ISO YYYY-MM-DD."""
@@ -298,7 +371,6 @@ def _normalize_date(val: Any) -> str:
             if len(y) == 4:
                 return f"{y}-{m.zfill(2)}-{d.zfill(2)}"
     return s
-
 
 # ---------------------------------------------------------------------------
 # Repositórios básicos (CRUD + find)
@@ -328,9 +400,16 @@ class BaseRepo:
             cur = conn.execute(f"DELETE FROM {self.table} WHERE id = ?", (id_,))
             return cur.rowcount > 0
 
-
 class CondominosRepo(BaseRepo):
     table = "condominos"
+
+    # Colunas permitidas em INSERT/UPDATE (whitelist contra SQL injection por nomes)
+    _ALLOWED_COLS = frozenset({
+        "fracao", "andar", "nome", "morada", "cpostal", "cidade",
+        "telemovel", "email", "permilagem", "quota_normal", "quota_extra",
+        "foto", "ativo", "admin",
+        "cc_numero", "cc_validade", "nif",
+    })
 
     def find_by_fracao(self, fracao: str) -> Optional[sqlite3.Row]:
         with self._conn() as conn:
@@ -344,14 +423,32 @@ class CondominosRepo(BaseRepo):
                 "SELECT * FROM condominos WHERE ativo = 1 ORDER BY fracao"
             ).fetchall()
 
+    def _filter_cols(self, data: dict) -> dict:
+        """Mantém apenas chaves conhecidas da tabela condominos."""
+        return {k: v for k, v in data.items() if k in self._ALLOWED_COLS}
+
     def upsert(self, data: dict) -> int:
-        """Insere ou actualiza por fracao. Devolve o id."""
+        """Insere ou actualiza por fracao. Devolve o id.
+
+        ATENÇÃO: só é seguro quando `data["fracao"]` ainda corresponde ao
+        condómino certo. Se a fracao de um condómino já existente estiver
+        a ser alterada (ex.: estava vazia e passou a ter um valor), esta
+        pesquisa por fracao já não encontra o registo antigo e cria-se um
+        duplicado. Para editar um condómino já existente, usa
+        `update_by_id`, que identifica o registo pelo `id` (estável),
+        nunca pela fracao.
+        """
+        data = self._filter_cols(data)
+        if "fracao" not in data:
+            raise ValueError("upsert condominos: 'fracao' é obrigatório")
         with self._conn() as conn:
             existing = conn.execute(
                 "SELECT id FROM condominos WHERE fracao = ?", (data["fracao"],)
             ).fetchone()
             if existing:
                 sets = ", ".join(f"{k} = ?" for k in data if k != "fracao")
+                if not sets:
+                    return existing["id"]
                 vals = [data[k] for k in data if k != "fracao"] + [data["fracao"]]
                 conn.execute(
                     f"UPDATE condominos SET {sets}, updated_at = datetime('now') WHERE fracao = ?",
@@ -366,6 +463,73 @@ class CondominosRepo(BaseRepo):
             )
             return cur.lastrowid
 
+    def update_by_id(self, id_: int, data: dict) -> bool:
+        """Actualiza um condómino já existente pelo `id` (estável),
+        independentemente do valor actual ou novo de `fracao`. É o método
+        correcto para gravar edições feitas no ecrã de Condóminos, onde o
+        `id` de cada linha é conhecido desde o carregamento."""
+        data = self._filter_cols(data)
+        if not data:
+            return False
+        with self._conn() as conn:
+            sets = ", ".join(f"{k} = ?" for k in data)
+            vals = list(data.values()) + [id_]
+            cur = conn.execute(
+                f"UPDATE condominos SET {sets}, updated_at = datetime('now') WHERE id = ?",
+                vals,
+            )
+            return cur.rowcount > 0
+
+class FracoesRepo(BaseRepo):
+    table = "fracoes"
+
+    _CREATE = """CREATE TABLE IF NOT EXISTS fracoes (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        fracao      TEXT    NOT NULL UNIQUE,
+        andar       TEXT    NOT NULL,
+        permilagem  REAL    NOT NULL,
+        created_at  TEXT    DEFAULT (datetime('now'))
+    )"""
+
+    def all_ordered(self) -> list[sqlite3.Row]:
+        """Todas as frações ordenadas por fração."""
+        with self._conn() as conn:
+            return conn.execute(
+                "SELECT id, fracao, andar, permilagem FROM fracoes "
+                "ORDER BY fracao, id"
+            ).fetchall()
+
+    def replace_all(self, rows: Sequence[dict]) -> int:
+        """Substitui todas as frações (usado pela GUI de Configurações).
+
+        Aceita chaves em minúsculas ou como na grelha (Fração/Andar/Permilagem).
+        Ignora linhas sem fração ou andar e frações repetidas (fica a 1ª).
+        Devolve o número de registos gravados.
+        """
+        with self._conn() as conn:
+            conn.execute(self._CREATE)
+            conn.execute("DELETE FROM fracoes")
+            vistas: set[str] = set()
+            n = 0
+            for r in rows:
+                fracao = str(r.get("fracao") or r.get("Fração") or "").strip().upper()
+                andar = str(r.get("andar") or r.get("Andar") or "").strip()
+                if not fracao or not andar or fracao in vistas:
+                    continue
+                perm = r.get("permilagem")
+                if perm is None:
+                    perm = r.get("Permilagem")
+                try:
+                    perm = float(str(perm).replace(",", ".")) if perm not in (None, "") else 0.0
+                except ValueError:
+                    perm = 0.0
+                conn.execute(
+                    "INSERT INTO fracoes (fracao, andar, permilagem) VALUES (?,?,?)",
+                    (fracao, andar, perm),
+                )
+                vistas.add(fracao)
+                n += 1
+            return n
 
 class RegrasRepo(BaseRepo):
     table = "regras"
@@ -395,8 +559,18 @@ class RegrasRepo(BaseRepo):
                 "SELECT * FROM regras WHERE ativo=1 AND normal IS NULL ORDER BY prioridade"
             ).fetchall()
 
+    _ALLOWED_COLS = frozenset({
+        "prioridade", "classe", "conta", "pattern", "normal", "extra", "ativo",
+    })
+
+    def _filter_cols(self, data: dict) -> dict:
+        return {k: v for k, v in data.items() if k in self._ALLOWED_COLS}
+
     def upsert(self, data: dict) -> int:
         """Insere ou actualiza por (pattern, normal, extra). Devolve o id."""
+        data = self._filter_cols(data)
+        if "pattern" not in data:
+            raise ValueError("upsert regras: 'pattern' é obrigatório")
         with self._conn() as conn:
             existing = conn.execute(
                 """SELECT id FROM regras
@@ -409,6 +583,8 @@ class RegrasRepo(BaseRepo):
             ).fetchone()
             if existing:
                 sets = ", ".join(f"{k}=?" for k in data if k != "pattern")
+                if not sets:
+                    return existing["id"]
                 vals = [data[k] for k in data if k != "pattern"] + [existing["id"]]
                 conn.execute(f"UPDATE regras SET {sets} WHERE id=?", vals)
                 return existing["id"]
@@ -451,7 +627,6 @@ class RegrasRepo(BaseRepo):
                 "SELECT DISTINCT conta FROM regras WHERE ativo=1 ORDER BY conta"
             ).fetchall()
             return [r["conta"] for r in rows]
-
 
 class MovimentosRepo(BaseRepo):
     table = "movimentos"
@@ -520,13 +695,15 @@ class MovimentosRepo(BaseRepo):
             )
             return cur.rowcount
 
-    def replace_fonte(self, fonte: str, rows: Sequence[dict]) -> int:
-        """Apaga todos os movimentos de uma fonte e insere os novos (útil na reimportação)."""
-        with self._conn() as conn:
-            conn.execute("DELETE FROM movimentos WHERE fonte = ?", (fonte,))
+    def replace_fonte(self, fonte: str, rows: Sequence[dict], conn=None) -> int:
+        """Apaga todos os movimentos de uma fonte e insere os novos.
+        Se `conn` for fornecido, usa essa conexão (não faz commit/rollback).
+        """
+        def _do(c):
+            c.execute("DELETE FROM movimentos WHERE fonte = ?", (fonte,))
             if not rows:
                 return 0
-            cur = conn.executemany(
+            cur = c.executemany(
                 """
                 INSERT INTO movimentos
                     (data, descricao, valor, saldo, tipo, conta, observacao, origem, fonte)
@@ -536,7 +713,10 @@ class MovimentosRepo(BaseRepo):
                 rows,
             )
             return cur.rowcount
-
+        if conn is not None:
+            return _do(conn)
+        with self._conn() as c:
+            return _do(c)
 
 class ConfigsRepo(BaseRepo):
     table = "configs"
@@ -558,9 +738,12 @@ class ConfigsRepo(BaseRepo):
             return val
 
     def set_value(self, categoria: str, chave: str, valor: Any,
-                  tipo: str = "String", descricao: str = "") -> None:
-        with self._conn() as conn:
-            conn.execute(
+                  tipo: str = "String", descricao: str = "", conn=None) -> None:
+        """Grava um valor de configuração.
+        Se `conn` for fornecido, usa essa conexão (não faz commit/rollback).
+        """
+        def _do(c):
+            c.execute(
                 """
                 INSERT INTO configs (categoria, chave, valor, tipo, descricao)
                 VALUES (?, ?, ?, ?, ?)
@@ -571,6 +754,11 @@ class ConfigsRepo(BaseRepo):
                 """,
                 (categoria, chave, str(valor) if valor is not None else None, tipo, descricao),
             )
+        if conn is not None:
+            _do(conn)
+        else:
+            with self._conn() as c:
+                _do(c)
 
     def all_by_categoria(self, categoria: str) -> list[sqlite3.Row]:
         with self._conn() as conn:
@@ -606,10 +794,12 @@ class ConfigsRepo(BaseRepo):
                 n += 1
             return n
 
-
 # Atalhos de conveniência
 def condominos(pasta=None) -> CondominosRepo:
     return CondominosRepo(pasta)
+
+def fracoes(pasta=None) -> FracoesRepo:
+    return FracoesRepo(pasta)
 
 def regras(pasta=None) -> RegrasRepo:
     return RegrasRepo(pasta)
@@ -620,6 +810,597 @@ def movimentos(pasta=None) -> MovimentosRepo:
 def configs(pasta=None) -> ConfigsRepo:
     return ConfigsRepo(pasta)
 
+# ---------------------------------------------------------------------------
+# API canónica — única interface pública de dados
+#
+# Contrato:
+#   - Argumento principal = pasta de dados (Path | str), NÃO path lógico DBF
+#   SQL / repos por baixo — sem bridge DBF/path-based
+# ---------------------------------------------------------------------------
+
+_STEMS_LOGICOS = frozenset({
+    "configs", "condominio.db", "bancos", "caixa", "dprazo", "condominos",
+    "receitasn", "receitase", "despesas", "juros", "saldos", "balanco", "contas",
+})
+
+def resolver_pasta(path_or_pasta) -> Path:
+    """
+    Normaliza qualquer caminho/nome para a pasta de dados que contém condominio.db.
+
+    Aceita: None, "corrente", Path("corrente"), .../corrente/Configs, .../condominio.db
+    """
+    if path_or_pasta is None:
+        return PASTA_CORRENTE
+    p = Path(path_or_pasta)
+    if p.name.lower() in _STEMS_LOGICOS:
+        p = p.parent
+    if not p.is_absolute():
+        candidate = BASE_DIR / p
+        if candidate.exists() or (candidate / DB_NAME).exists():
+            return candidate
+        # nome lógico de pasta (ex. corrente) mesmo ainda sem ficheiros
+        if len(p.parts) == 1:
+            return candidate
+        return p
+    return p
+
+def fracao_de_conta_quota(conta: str) -> str:
+    """Remove prefixo 'Quota … - ' da conta; devolve o nome de fracção/andar."""
+    import re
+    conta = (conta or "").strip()
+    base = re.sub(
+        r"^(Quota\s*(extra|total)?\s*-\s*)",
+        "",
+        conta,
+        flags=re.IGNORECASE,
+    ).strip()
+    return base or conta
+
+def is_regra_condomino(
+    classe: str | None,
+    conta: str | None,
+    normal,
+    extra,
+) -> bool:
+    """
+    Critério único: regra de quota de condómino.
+    RECEITA + normal preenchido + (extra preenchido OU conta sugere quota/fracção).
+    """
+    if normal is None:
+        return False
+    if (classe or "").strip().upper() != "RECEITA":
+        return False
+    conta_l = (conta or "").lower()
+    return (
+        extra is not None
+        or "quota" in conta_l
+        or "frac" in conta_l
+    )
+
+def quotas_por_fracao(pasta=None) -> dict:
+    """
+    Quotas por rótulo de fracção/andar a partir da tabela ``condominos``.
+
+    Fonte: ``quota_normal`` / ``quota_extra`` (não a tabela ``regras``).
+
+    Returns:
+        dict[str, dict]: {
+            "R/c Esq.": {"QUOTA_NORMAL": 18.0, "QUOTA_EXTRA": 46.0, "QUOTA_TOTAL": 64.0},
+            ...
+        }
+    """
+    pasta = resolver_pasta(pasta)
+    if not db_path(pasta).exists():
+        return {}
+
+    out: dict = {}
+    try:
+        with get_connection(pasta) as conn:
+            rows = conn.execute(
+                """
+                SELECT fracao, andar, quota_normal, quota_extra
+                FROM condominos
+                ORDER BY fracao, id
+                """
+            ).fetchall()
+    except Exception as exc:
+        print(f"⚠️ quotas_por_fracao: {exc}")
+        return {}
+
+    letra_para_label, _ = _mapas_fracoes_db(pasta)
+    for r in rows:
+        try:
+            qn = float(r["quota_normal"] or 0)
+        except (TypeError, ValueError):
+            qn = 0.0
+        try:
+            qe = float(r["quota_extra"] or 0)
+        except (TypeError, ValueError):
+            qe = 0.0
+        andar = (r["andar"] or "").strip()
+        fracao = (r["fracao"] or "").strip()
+        if andar:
+            key = andar
+        elif fracao and fracao.upper() in letra_para_label:
+            key = letra_para_label[fracao.upper()]
+        else:
+            key = fracao
+        if not key or key in out:
+            continue
+        out[key] = {
+            "QUOTA_NORMAL": qn,
+            "QUOTA_EXTRA": qe,
+            "QUOTA_TOTAL": round(qn + qe, 2),
+        }
+    return out
+
+def condominos_para_categorizacao(pasta=None) -> list[dict]:
+    """
+    Lista para categorização de extractos (Bancos).
+
+    - **Match (nome no extracto):** padrões da tabela ``regras`` (como antes)
+      + nome da ficha ``condominos``.
+    - **Valores de quota:** SEMPRE ``condominos.quota_normal`` /
+      ``condominos.quota_extra`` — nunca ``regras.normal/extra``.
+
+    Cada item: PREFIXO, NOME, NOME_ALTERNATIVO, VALOR_NORMAL, VALOR_EXTRA,
+               VALOR_TOTAL, CONTA
+    """
+    pasta = resolver_pasta(pasta)
+    if not db_path(pasta).exists():
+        return []
+
+    try:
+        from Commons import remover_acentos
+    except ImportError:
+        def remover_acentos(t):  # type: ignore
+            return t
+
+    def _norm(s: str) -> str:
+        s = remover_acentos((s or "").strip()).upper()
+        return " ".join(s.split())
+
+    # ── 1. Quotas a partir de condominos (fonte única dos valores) ───────────
+    por_fracao: dict[str, dict] = {}
+    por_andar: dict[str, dict] = {}
+    try:
+        with get_connection(pasta) as conn:
+            rows_co = conn.execute(
+                """
+                SELECT fracao, andar, nome, quota_normal, quota_extra
+                FROM condominos
+                ORDER BY fracao, id
+                """
+            ).fetchall()
+    except Exception as exc:
+        print(f"⚠️ condominos_para_categorizacao (condominos): {exc}")
+        rows_co = []
+
+    letra_para_label, label_para_letra = _mapas_fracoes_db(pasta)
+
+    for r in rows_co:
+        try:
+            qn = float(r["quota_normal"] or 0)
+        except (TypeError, ValueError):
+            qn = 0.0
+        try:
+            qe = float(r["quota_extra"] or 0)
+        except (TypeError, ValueError):
+            qe = 0.0
+        if qn <= 0 and qe <= 0:
+            nome = (r["nome"] or "").strip() or "?"
+            print(
+                f"  ⚠️ Condómino '{nome}' sem QUOTAN/QUOTAE na ficha "
+                f"— não será usado na categorização"
+            )
+            continue
+
+        fracao = (r["fracao"] or "").strip().upper()
+        andar = (r["andar"] or "").strip()
+        if not andar and fracao in letra_para_label:
+            andar = letra_para_label[fracao]
+        nome = (r["nome"] or "").strip()
+        info = {
+            "fracao": fracao,
+            "andar": andar,
+            "nome": nome,
+            "qn": qn,
+            "qe": qe,
+        }
+        if fracao and fracao not in por_fracao:
+            por_fracao[fracao] = info
+        if andar and andar not in por_andar:
+            por_andar[andar] = info
+        and_key = _norm(andar).replace(" ", "")
+        if and_key:
+            por_andar.setdefault(and_key, info)
+
+    if not por_fracao and not por_andar:
+        print("  ⚠️ Nenhum condómino com quotas na tabela condominos")
+        return []
+
+    def _resolver_info(conta: str, pattern: str) -> dict | None:
+        """Liga conta/padrão da regra à ficha condominos (por fracção/andar)."""
+        conta = (conta or "").strip()
+        label = fracao_de_conta_quota(conta)
+        if label and label in por_andar:
+            return por_andar[label]
+        if label:
+            label_key = _norm_fracao_label(label)
+            label_key_compact = label_key.replace(" ", "")
+            letra2 = None
+            for lbl_norm, letra in label_para_letra.items():
+                if lbl_norm == label_key or lbl_norm.replace(" ", "") == label_key_compact:
+                    letra2 = letra
+                    break
+            if letra2 and letra2 in por_fracao:
+                return por_fracao[letra2]
+        if conta.upper() in por_fracao:
+            return por_fracao[conta.upper()]
+        if conta in por_andar:
+            return por_andar[conta]
+        ck = _norm(conta).replace(" ", "")
+        if ck in por_andar:
+            return por_andar[ck]
+        p = _norm(pattern)
+        if p:
+            for info in por_fracao.values():
+                n = _norm(info["nome"])
+                if n and (p in n or n in p):
+                    return info
+        return None
+
+    # ── 2. Match pelos padrões de regras (como antes batia certo) ───────────
+    result: list[dict] = []
+    vistos_padrao: set[str] = set()
+    try:
+        with get_connection(pasta) as conn:
+            rows_reg = conn.execute(
+                """
+                SELECT pattern, conta, classe, normal, extra
+                FROM regras
+                WHERE ativo = 1
+                ORDER BY prioridade, id
+                """
+            ).fetchall()
+    except Exception as exc:
+        print(f"⚠️ condominos_para_categorizacao (regras): {exc}")
+        rows_reg = []
+
+    for r in rows_reg:
+        pattern = (r["pattern"] or "").strip()
+        conta = (r["conta"] or "").strip()
+        if not pattern:
+            continue
+        if not is_regra_condomino(r["classe"], conta, r["normal"], r["extra"]):
+            continue
+
+        info = _resolver_info(conta, pattern)
+        if not info:
+            print(
+                f"  ⚠️ Regra '{pattern}' / conta '{conta}' sem ficha em "
+                f"condominos com quotas — ignorada"
+            )
+            continue
+
+        nome_match = _norm(pattern)
+        if not nome_match or nome_match in vistos_padrao:
+            continue
+        vistos_padrao.add(nome_match)
+
+        qn, qe = info["qn"], info["qe"]
+        conta_label = info["andar"] or fracao_de_conta_quota(conta) or conta
+        result.append({
+            "PREFIXO": info["fracao"] or conta_label,
+            "NOME": nome_match,
+            "NOME_ALTERNATIVO": _norm(info["nome"]) if info["nome"] else "",
+            "VALOR_NORMAL": qn,
+            "VALOR_EXTRA": qe,
+            "VALOR_TOTAL": round(qn + qe, 2),
+            "CONTA": conta_label,
+        })
+        print(
+            f"  ✓ Match '{pattern}' → {conta_label}: "
+            f"Normal={qn:.2f} Extra={qe:.2f} (tabela condominos)"
+        )
+
+    # ── 3. Condóminos sem regra: match pelo nome da ficha ───────────────────
+    for info in por_fracao.values():
+        nome_match = _norm(info["nome"])
+        if not nome_match or nome_match in vistos_padrao:
+            continue
+        vistos_padrao.add(nome_match)
+        qn, qe = info["qn"], info["qe"]
+        conta_label = info["andar"] or info["fracao"]
+        result.append({
+            "PREFIXO": info["fracao"] or conta_label,
+            "NOME": nome_match,
+            "NOME_ALTERNATIVO": "",
+            "VALOR_NORMAL": qn,
+            "VALOR_EXTRA": qe,
+            "VALOR_TOTAL": round(qn + qe, 2),
+            "CONTA": conta_label,
+        })
+        print(
+            f"  ✓ Match nome ficha '{info['nome']}' → {conta_label}: "
+            f"Normal={qn:.2f} Extra={qe:.2f}"
+        )
+
+    result.sort(key=lambda x: x.get("NOME", ""))
+    return result
+
+def regras_condominos_lista(pasta=None) -> list[dict]:
+    """
+    Lista para categorização Bancos.
+
+    Match: padrões ``regras`` (+ nome da ficha).
+    Valores: tabela ``condominos`` (quota_normal / quota_extra).
+    """
+    return condominos_para_categorizacao(pasta)
+
+def db_existe(pasta=None) -> bool:
+    """True se condominio.db existe na pasta de dados."""
+    return db_path(resolver_pasta(pasta)).exists()
+
+def carregar_condominos(pasta=None) -> list[dict]:
+    """Lista de condóminos (chaves MAIÚSCULAS legado)."""
+    pasta = resolver_pasta(pasta)
+    result = _carregar_condominos_relacional(pasta)
+    if result is None:
+        return []
+    rows, _ = result
+    return rows
+
+def guardar_condominos(rows_or_df, pasta=None) -> bool:
+    """Grava lista/DataFrame de condóminos."""
+    pasta = resolver_pasta(pasta)
+    if pd is None:
+        return False
+    if hasattr(rows_or_df, "iterrows"):
+        df = rows_or_df
+    else:
+        df = pd.DataFrame(list(rows_or_df or []), dtype=object)
+    return bool(_salvar_condominos_relacional(df, pasta))
+
+def carregar_configs(pasta=None) -> list[dict]:
+    """Lista de configs (CATEGORIA, CHAVE, VALOR, TIPO, DESCRICAO)."""
+    pasta = resolver_pasta(pasta)
+    result = _carregar_configs_relacional(pasta)
+    if result is None:
+        return []
+    rows, _ = result
+    return rows
+
+def guardar_configs(rows_or_df, pasta=None) -> bool:
+    """Substitui configs a partir de lista/DataFrame."""
+    pasta = resolver_pasta(pasta)
+    if pd is None:
+        return False
+    if hasattr(rows_or_df, "iterrows"):
+        df = rows_or_df
+    else:
+        df = pd.DataFrame(list(rows_or_df or []), dtype=object)
+    return bool(_salvar_configs_relacional(df, pasta))
+
+def movimentos_dataframe(pasta=None, fontes=None):
+    """
+    Movimentos de condominio.db como DataFrame (colunas legado MAIÚSCULAS).
+
+    Args:
+        pasta: pasta de dados (ou path lógico — resolvido por resolver_pasta)
+        fontes: None = todas; ou iterável de fontes
+                (aceita 'bancos'/'Bancos', 'caixa', 'dprazo', …)
+
+    Returns:
+        pandas.DataFrame com colunas:
+        DATA, TIPO, CONTA, DESCRICAO, VALOR, OBSERVACAO, FONTE
+        (vazio se não houver dados ou pandas indisponível)
+    """
+    if pd is None:
+        raise ImportError("pandas é necessário para movimentos_dataframe")
+
+    pasta = resolver_pasta(pasta)
+    if not db_path(pasta).exists():
+        return pd.DataFrame(
+            columns=["DATA", "TIPO", "CONTA", "DESCRICAO", "VALOR", "OBSERVACAO", "FONTE"]
+        )
+
+    fontes_norm = None
+    if fontes is not None:
+        fontes_norm = [str(f).strip().lower() for f in fontes if str(f).strip()]
+
+    try:
+        with get_connection(pasta) as conn:
+            if fontes_norm:
+                placeholders = ",".join("?" * len(fontes_norm))
+                sql = f"""
+                    SELECT data, tipo, conta, descricao, valor, observacao, fonte
+                    FROM movimentos
+                    WHERE lower(fonte) IN ({placeholders})
+                    ORDER BY data, id
+                """
+                rows = conn.execute(sql, fontes_norm).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT data, tipo, conta, descricao, valor, observacao, fonte
+                    FROM movimentos
+                    ORDER BY data, id
+                    """
+                ).fetchall()
+    except Exception as exc:
+        print(f"⚠️ movimentos_dataframe: {exc}")
+        return pd.DataFrame(
+            columns=["DATA", "TIPO", "CONTA", "DESCRICAO", "VALOR", "OBSERVACAO", "FONTE"]
+        )
+
+    if not rows:
+        return pd.DataFrame(
+            columns=["DATA", "TIPO", "CONTA", "DESCRICAO", "VALOR", "OBSERVACAO", "FONTE"]
+        )
+
+    records = [
+        {
+            "DATA": r["data"],
+            "TIPO": r["tipo"] or "",
+            "CONTA": r["conta"] or "",
+            "DESCRICAO": r["descricao"] or "",
+            "VALOR": r["valor"],
+            "OBSERVACAO": r["observacao"] or "",
+            "FONTE": r["fonte"] or "",
+        }
+        for r in rows
+    ]
+    df = pd.DataFrame(records, dtype=object)
+    # Dedup legado (mesmo critério Receitas/Despesas)
+    antes = len(df)
+    df = df.drop_duplicates(subset=["DATA", "CONTA", "VALOR"], keep="first").reset_index(drop=True)
+    if antes > len(df):
+        print(f"  🧹 Removidos {antes - len(df)} movimentos duplicados")
+    return df
+
+def aglutinar_movimentos(
+    bancos_db_path=None,
+    caixa_db_path=None,
+    dprazo_db_path=None,
+    pasta=None,
+    fontes=None,
+    *,
+    verbose: bool = True,
+    incluir_fonte: bool = False,
+):
+    """
+    Aglutina movimentos de várias fontes num único DataFrame (API canónica).
+
+    Substitui as cópias locais que existiam em Receitas.py e Despesas.py.
+
+    Resolução da pasta (por ordem de prioridade):
+        1. ``pasta``
+        2. ``bancos_db_path`` / ``caixa_db_path`` / ``dprazo_db_path`` (paths legados)
+        3. pasta corrente
+
+    Fontes:
+        - Se ``fontes`` for dado, usa-se tal qual.
+        - Senão: bancos + caixa; inclui dprazo se ``dprazo_db_path`` for truthy.
+
+    Returns:
+        DataFrame com colunas DATA, TIPO, CONTA, DESCRICAO, VALOR, OBSERVACAO
+        (+ FONTE se ``incluir_fonte=True``). DataFrame vazio se não houver dados.
+    """
+    if pasta is not None:
+        pasta_res = resolver_pasta(pasta)
+    elif bancos_db_path is not None:
+        pasta_res = resolver_pasta(bancos_db_path)
+    elif caixa_db_path is not None:
+        pasta_res = resolver_pasta(caixa_db_path)
+    elif dprazo_db_path is not None:
+        pasta_res = resolver_pasta(dprazo_db_path)
+    else:
+        pasta_res = resolver_pasta(None)
+
+    if fontes is not None:
+        fontes_res = list(fontes)
+    else:
+        fontes_res = ["bancos", "caixa"]
+        if dprazo_db_path:
+            fontes_res.append("dprazo")
+
+    if verbose:
+        print(f"\n{'='*80}")
+        print(f"🔄 AGLUTINAÇÃO DE MOVIMENTOS (SQL / {'+'.join(fontes_res)})")
+        print(f"{'='*80}")
+
+    df = movimentos_dataframe(pasta_res, fontes=fontes_res)
+
+    if df.empty:
+        if verbose:
+            print("  ❌ ERRO: Nenhum movimento encontrado")
+            print(f"{'='*80}\n")
+        return df
+
+    if verbose and "FONTE" in df.columns:
+        for fonte, n in df["FONTE"].astype(str).str.lower().value_counts().items():
+            print(f"  ✅ {fonte}: {n} registos")
+        print(f"\n  📊 Total aglutinado: {len(df)} movimentos únicos")
+        print(f"{'='*80}\n")
+
+    cols = ["DATA", "TIPO", "CONTA", "DESCRICAO", "VALOR", "OBSERVACAO"]
+    if incluir_fonte:
+        cols.append("FONTE")
+    return df[[c for c in cols if c in df.columns]].copy()
+
+
+_FONTE_POR_STEM = {
+    "bancos": "bancos",
+    "caixa": "caixa",
+    "dprazo": "dprazo",
+}
+
+def fonte_de_path(path_or_fonte) -> str:
+    """Normaliza 'Bancos' / '.../Caixa' / 'dprazo' → fonte SQL."""
+    if path_or_fonte is None:
+        return "bancos"
+    s = str(path_or_fonte).strip()
+    name = Path(s).name
+    key = name.casefold()
+    if key in _FONTE_POR_STEM:
+        return _FONTE_POR_STEM[key]
+    # path completo .../Bancos
+    stem = Path(s).stem.casefold()
+    return _FONTE_POR_STEM.get(stem, key)
+
+def carregar_movimentos_fonte(pasta=None, fonte="bancos") -> list[dict]:
+    """
+    Movimentos de uma fonte como lista de dicts (chaves MAIÚSCULAS).
+
+    Returns:
+        [{DATA, TIPO, CONTA, DESCRICAO, VALOR, SALDO, OBSERVACAO}, ...]
+    """
+    pasta = resolver_pasta(pasta)
+    fonte = fonte_de_path(fonte)
+    if not db_path(pasta).exists():
+        return []
+    try:
+        create_schema(pasta)
+        rows_rel = MovimentosRepo(pasta).find(fonte=fonte)
+    except Exception as exc:
+        print(f"⚠️ carregar_movimentos_fonte({fonte}): {exc}")
+        return []
+    out = []
+    for r in rows_rel:
+        out.append({
+            "DATA": r["data"],
+            "TIPO": r["tipo"] or "",
+            "CONTA": r["conta"] or "",
+            "DESCRICAO": r["descricao"] or "",
+            "VALOR": r["valor"],
+            "SALDO": r["saldo"],
+            "OBSERVACAO": r["observacao"] or "",
+        })
+    return out
+
+def guardar_movimentos_fonte(rows_or_df, pasta=None, fonte="bancos", conn=None) -> bool:
+    """
+    Substitui todos os movimentos de uma fonte.
+
+    rows_or_df: list[dict] com chaves MAIÚSCULAS ou DataFrame equivalente.
+    Se `conn` for fornecido, usa essa conexão (transação externa).
+    """
+    pasta = resolver_pasta(pasta)
+    fonte = fonte_de_path(fonte)
+    try:
+        if pd is not None and hasattr(rows_or_df, "iterrows"):
+            df = rows_or_df
+        else:
+            df = pd.DataFrame(list(rows_or_df or []), dtype=object)
+        n = sync_movimentos_from_legacy_df(df, fonte, pasta, conn=conn)
+        print(f"  ✓ {n} movimentos gravados ({fonte}) em {pasta}")
+        return True
+    except Exception as exc:
+        print(f"⚠️ guardar_movimentos_fonte({fonte}): {exc}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 # ---------------------------------------------------------------------------
 # Views / FTS / pesquisas avançadas
@@ -694,7 +1475,6 @@ LEFT JOIN receitas_mensais r ON r.condominio_id = co.id
 GROUP BY co.id, co.fracao, co.nome, co.quota_normal, co.quota_extra, r.ano;
 """
 
-
 def ensure_views_and_fts(pasta: Path | None = None) -> None:
     """Cria views e índice FTS5 (idempotente)."""
     with get_connection(pasta, row_factory=False) as conn:
@@ -728,7 +1508,6 @@ def ensure_views_and_fts(pasta: Path | None = None) -> None:
         except Exception:
             pass
 
-
 def search_movimentos_fts(query: str, pasta: Path | None = None, limit: int = 50) -> list:
     """Pesquisa full-text nas descrições dos movimentos."""
     ensure_views_and_fts(pasta)
@@ -758,18 +1537,18 @@ def search_movimentos_fts(query: str, pasta: Path | None = None, limit: int = 50
                 (f"%{query}%", limit),
             ).fetchall()
 
-
-def sync_movimentos_from_legacy_df(df, fonte: str, pasta: Path | None = None) -> int:
+def sync_movimentos_from_legacy_df(df, fonte: str, pasta: Path | None = None, conn=None) -> int:
     """
     Sincroniza um DataFrame no formato legado (DATA, DESCRICAO, VALOR, SALDO, TIPO, CONTA, OBSERVACAO)
     para a tabela movimentos de condominio.db (substitui todos os da fonte).
     V5: conta é TEXT directo, sem FK para contas.
+    Se `conn` for fornecido, usa essa conexão (não reconstrói FTS dentro da transação externa).
     """
-    from Database import MovimentosRepo, _normalize_date, _to_float, _to_str
-
+    # Usa símbolos já definidos neste módulo (evita auto-import circular)
     pasta = pasta or PASTA_CORRENTE
-    create_schema(pasta)
-    ensure_views_and_fts(pasta)
+    if conn is None:
+        create_schema(pasta)
+        ensure_views_and_fts(pasta)
     mov_repo = MovimentosRepo(pasta)
 
     rows = []
@@ -791,8 +1570,10 @@ def sync_movimentos_from_legacy_df(df, fonte: str, pasta: Path | None = None) ->
             "fonte": fonte,
         })
 
-    n = mov_repo.replace_fonte(fonte, rows)
-    # Rebuild FTS for this fonte
+    n = mov_repo.replace_fonte(fonte, rows, conn=conn)
+    # Rebuild FTS apenas quando não estamos dentro de uma transação externa
+    if conn is not None:
+        return n
     try:
         with get_connection(pasta, row_factory=False) as conn:
             # BUGFIX: "DELETE FROM movimentos_fts" (sem WHERE) não é a forma
@@ -812,7 +1593,6 @@ def sync_movimentos_from_legacy_df(df, fonte: str, pasta: Path | None = None) ->
     except Exception as e:
         print(f"  ⚠️ Reconstrução do índice FTS falhou: {e}")
     return n
-
 
 class ReceitasRepo(BaseRepo):
     table = "receitas_mensais"
@@ -840,7 +1620,6 @@ class ReceitasRepo(BaseRepo):
                 (condominio_id, ano),
             ).fetchall()
 
-
 class DespesasRepo(BaseRepo):
     table = "despesas_mensais"
 
@@ -855,80 +1634,116 @@ class DespesasRepo(BaseRepo):
                 "SELECT * FROM v_despesas_pivot ORDER BY ano, conta"
             ).fetchall()
 
-
 def receitas(pasta=None) -> ReceitasRepo:
     return ReceitasRepo(pasta)
 
 def despesas(pasta=None) -> DespesasRepo:
     return DespesasRepo(pasta)
 
-
-
-
 # ---------------------------------------------------------------------------
 # Pivot largo (compatibilidade ReceitasN/E, Despesas, Juros)
 # ---------------------------------------------------------------------------
 
-MAPA_FRACAO_PARA_LETRA = {
-    "R/C ESQ.": "A", "R/C DTO.": "B",
-    "1º ESQ.": "C", "1 ESQ.": "C", "1° ESQ.": "C",
-    "1º DTO.": "D", "1 DTO.": "D", "1° DTO.": "D",
-    "2º ESQ.": "E", "2 ESQ.": "E", "2° ESQ.": "E",
-    "2º DTO.": "F", "2 DTO.": "F", "2° DTO.": "F",
-}
-MAPA_LETRA_PARA_LABEL = {
-    "A": "R/c Esq.", "B": "R/c Dto.",
-    "C": "1º Esq.", "D": "1º Dto.",
-    "E": "2º Esq.", "F": "2º Dto.",
-}
 MESES_COLS = ["JAN", "FEV", "MAR", "ABR", "MAI", "JUN", "JUL", "AGO", "SET", "OUT", "NOV", "DEZ"]
 MESES_KEYS = ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"]
-
 
 def _norm_fracao_label(label: str) -> str:
     s = " ".join(str(label or "").upper().replace("º", "º").replace("°", "º").split())
     return s
 
+def mapas_fracoes(pasta=None) -> tuple[dict[str, str], dict[str, str]]:
+    """
+    API pública: mapas letra↔andar a partir da tabela ``fracoes``.
 
-def _letra_from_label(label: str) -> str | None:
+    Returns:
+        (letra_para_label, label_norm_para_letra)
+        ex.: ({"A": "R/c Esq.", ...}, {"r/c esq.": "A", ...})
+    """
+    return _mapas_fracoes_db(pasta)
+
+
+def _mapas_fracoes_db(pasta=None) -> tuple[dict[str, str], dict[str, str]]:
+    """
+    Mapas fracao(letra)↔andar(rótulo), construídos a partir da tabela
+    'fracoes' — fonte de verdade única, editável em Configurações.
+
+    Substitui o antigo mapeamento fixo no código: uma fracção nova, uma
+    letra reatribuída ou um rótulo renomeado ficam automaticamente
+    reflectidos em toda a aplicação, sem precisar de tocar em código.
+
+    Returns:
+        (letra_para_label, label_norm_para_letra)
+    """
+    pasta = resolver_pasta(pasta)
+    letra_para_label: dict[str, str] = {}
+    label_para_letra: dict[str, str] = {}
+    try:
+        for r in fracoes(pasta).all_ordered():
+            letra = str(r["fracao"] or "").strip().upper()
+            andar = str(r["andar"] or "").strip()
+            if not letra:
+                continue
+            letra_para_label[letra] = andar or letra
+            if andar:
+                label_para_letra[_norm_fracao_label(andar)] = letra
+    except Exception as exc:
+        print(f"⚠️ _mapas_fracoes_db: {exc}")
+    return letra_para_label, label_para_letra
+
+def _letra_from_label(label: str, letra_para_label: dict, label_para_letra: dict) -> str | None:
+    """
+    Converte um rótulo de fracção (ex. 'R/c Esq.') na letra correspondente
+    (ex. 'A'), usando os mapas já carregados da tabela 'fracoes'
+    (ver ``_mapas_fracoes_db``).
+    """
     key = _norm_fracao_label(label)
-    if key in MAPA_FRACAO_PARA_LETRA:
-        return MAPA_FRACAO_PARA_LETRA[key]
-    # fuzzy
-    for k, v in MAPA_FRACAO_PARA_LETRA.items():
-        if k.replace(" ", "") in key.replace(" ", "") or key.replace(" ", "") in k.replace(" ", ""):
-            return v
-    # already a letter?
-    if len(key) == 1 and key in "ABCDEF":
+    if key in label_para_letra:
+        return label_para_letra[key]
+    # correspondência aproximada: ignora espaços e o símbolo de grau (º/°),
+    # para apanhar variantes como '1 Esq.' ou '1° Esq.' vs '1º Esq.'
+    key_compact = key.replace(" ", "").replace("º", "")
+    for lbl_norm, letra in label_para_letra.items():
+        lbl_compact = lbl_norm.replace(" ", "").replace("º", "")
+        if lbl_compact and (lbl_compact in key_compact or key_compact in lbl_compact):
+            return letra
+    # o próprio valor já é uma letra de fracção existente?
+    if len(key) == 1 and key in letra_para_label:
         return key
     return None
 
+def ano_exercicio(pasta=None) -> int:
+    """Ano do exercício (Configs GERAL/ANO_EXERCICIO). API pública."""
+    return _ano_exercicio(resolver_pasta(pasta))
 
 def _ano_exercicio(pasta: Path | None = None) -> int:
+    """Ano do exercício a partir de Configs; fallback = ano civil actual."""
     try:
-        v = ConfigsRepo(pasta).get_value("GERAL", "ANO_EXERCICIO", 2026)
+        v = ConfigsRepo(pasta).get_value("GERAL", "ANO_EXERCICIO", None)
+        if v is None or str(v).strip() == "":
+            return datetime.date.today().year
         return int(float(str(v).replace(",", ".")))
     except Exception:
-        return 2026
+        return datetime.date.today().year
 
-
-def save_receitas_wide(df, tipo_quota: str, pasta: Path | None = None, ano: int | None = None) -> int:
-    """Grava DataFrame largo ReceitasN/E em receitas_mensais + receitas_resumo."""
-    pasta = pasta or PASTA_CORRENTE
-    create_schema(pasta)
-    ensure_views_and_fts(pasta)
+def save_receitas_wide(df, tipo_quota: str, pasta: Path | None = None, ano: int | None = None, conn=None) -> int:
+    """Grava DataFrame largo ReceitasN/E em receitas_mensais + receitas_resumo.
+    Se `conn` for fornecido, usa essa conexão (não faz commit/rollback).
+    """
+    pasta = resolver_pasta(pasta)
     ano = ano or _ano_exercicio(pasta)
     tipo_quota = tipo_quota.upper()
     if tipo_quota not in ("NORMAL", "EXTRA"):
         raise ValueError(tipo_quota)
 
-    with get_connection(pasta) as conn:
-        condo_map = {r["fracao"]: r["id"] for r in conn.execute("SELECT id, fracao FROM condominos")}
-        conn.execute(
+    letra_para_label, label_para_letra = _mapas_fracoes_db(pasta)
+
+    def _do(c):
+        condo_map = {r["fracao"]: r["id"] for r in c.execute("SELECT id, fracao FROM condominos")}
+        c.execute(
             "DELETE FROM receitas_mensais WHERE ano = ? AND tipo_quota = ?",
             (ano, tipo_quota),
         )
-        conn.execute(
+        c.execute(
             "DELETE FROM receitas_resumo WHERE ano = ? AND tipo_quota = ?",
             (ano, tipo_quota),
         )
@@ -938,7 +1753,7 @@ def save_receitas_wide(df, tipo_quota: str, pasta: Path | None = None, ano: int 
             label = str(d.get("FRACCAO") or "").strip()
             if not label or label.upper() == "TOTAIS":
                 continue
-            letra = _letra_from_label(label)
+            letra = _letra_from_label(label, letra_para_label, label_para_letra)
             if not letra or letra not in condo_map:
                 print(f"  ⚠️ Fracção não mapeada: {label!r}")
                 continue
@@ -947,14 +1762,14 @@ def save_receitas_wide(df, tipo_quota: str, pasta: Path | None = None, ano: int 
                 val = _to_float(d.get(col, 0))
                 if abs(val) < 0.0005:
                     continue
-                conn.execute(
+                c.execute(
                     """INSERT OR REPLACE INTO receitas_mensais
                        (condominio_id, ano, mes, tipo_quota, valor)
                        VALUES (?,?,?,?,?)""",
                     (cid, ano, mes, tipo_quota, val),
                 )
                 n += 1
-            conn.execute(
+            c.execute(
                 """INSERT OR REPLACE INTO receitas_resumo
                    (condominio_id, ano, tipo_quota, fracao_label, saldo_ant, saldo)
                    VALUES (?,?,?,?,?,?)""",
@@ -963,14 +1778,21 @@ def save_receitas_wide(df, tipo_quota: str, pasta: Path | None = None, ano: int 
             )
         return n
 
+    if conn is not None:
+        return _do(conn)
+    create_schema(pasta)
+    ensure_views_and_fts(pasta)
+    with get_connection(pasta) as c:
+        return _do(c)
 
 def load_receitas_wide(tipo_quota: str, pasta: Path | None = None, ano: int | None = None):
     """Devolve (rows_legado, fields) no formato ReceitasN/E."""
-    pasta = pasta or PASTA_CORRENTE
+    pasta = resolver_pasta(pasta)
     ensure_views_and_fts(pasta)
     ano = ano or _ano_exercicio(pasta)
     tipo_quota = tipo_quota.upper()
     fields = ["FRACCAO", "SALDO_ANT"] + MESES_COLS + ["TOTAL", "SALDO"]
+    letra_para_label, _ = _mapas_fracoes_db(pasta)
 
     with get_connection(pasta) as conn:
         pivots = conn.execute(
@@ -1021,7 +1843,7 @@ def load_receitas_wide(tipo_quota: str, pasta: Path | None = None, ano: int | No
             cid = id_by_fracao.get(letra)
             res = resumos.get(cid) if cid else None
             label = (res["fracao_label"] if res and res["fracao_label"]
-                     else MAPA_LETRA_PARA_LABEL.get(letra, letra))
+                     else letra_para_label.get(letra, letra))
             row = {"FRACCAO": label}
             total = 0.0
             for mk, col in zip(MESES_KEYS, MESES_COLS):
@@ -1044,16 +1866,14 @@ def load_receitas_wide(tipo_quota: str, pasta: Path | None = None, ano: int | No
 
         return rows, fields
 
-
-def save_despesas_wide(df, pasta: Path | None = None, ano: int | None = None) -> int:
-    """Grava DataFrame largo Despesas em despesas_mensais."""
-    pasta = pasta or PASTA_CORRENTE
-    create_schema(pasta)
-    ensure_views_and_fts(pasta)
+def save_despesas_wide(df, pasta: Path | None = None, ano: int | None = None, conn=None) -> int:
+    """Grava DataFrame largo Despesas em despesas_mensais.
+    Se `conn` for fornecido, usa essa conexão (não faz commit/rollback).
+    """
+    pasta = resolver_pasta(pasta)
     ano = ano or _ano_exercicio(pasta)
-
-    with get_connection(pasta) as conn:
-        conn.execute("DELETE FROM despesas_mensais WHERE ano = ?", (ano,))
+    def _do(c):
+        c.execute("DELETE FROM despesas_mensais WHERE ano = ?", (ano,))
         n = 0
         for _, row in df.iterrows():
             d = {str(k).upper(): row[k] for k in df.columns}
@@ -1064,18 +1884,23 @@ def save_despesas_wide(df, pasta: Path | None = None, ano: int | None = None) ->
                 val = _to_float(d.get(col, 0))
                 if abs(val) < 0.0005:
                     continue
-                conn.execute(
+                c.execute(
                     """INSERT OR REPLACE INTO despesas_mensais
                        (conta, ano, mes, valor) VALUES (?,?,?,?)""",
                     (nome, ano, mes, val),
                 )
                 n += 1
         return n
-
+    if conn is not None:
+        return _do(conn)
+    create_schema(pasta)
+    ensure_views_and_fts(pasta)
+    with get_connection(pasta) as c:
+        return _do(c)
 
 def load_despesas_wide(pasta: Path | None = None, ano: int | None = None):
     """Devolve (rows_legado, fields) no formato Despesas."""
-    pasta = pasta or PASTA_CORRENTE
+    pasta = resolver_pasta(pasta)
     ensure_views_and_fts(pasta)
     ano = ano or _ano_exercicio(pasta)
     fields = ["DESPESAS"] + MESES_COLS + ["TOTAL"]
@@ -1105,13 +1930,12 @@ def load_despesas_wide(pasta: Path | None = None, ano: int | None = None):
             rows.append(tot)
         return rows, fields
 
-
-def save_juros_wide(df, pasta: Path | None = None, ano: int | None = None) -> int:
-    pasta = pasta or PASTA_CORRENTE
-    create_schema(pasta)
+def save_juros_wide(df, pasta: Path | None = None, ano: int | None = None, conn=None) -> int:
+    """Grava DataFrame largo Juros. Se `conn` for fornecido, usa essa conexão."""
+    pasta = resolver_pasta(pasta)
     ano = ano or _ano_exercicio(pasta)
-    with get_connection(pasta) as conn:
-        conn.execute("DELETE FROM juros WHERE ano = ?", (ano,))
+    def _do(c):
+        c.execute("DELETE FROM juros WHERE ano = ?", (ano,))
         n = 0
         for _, row in df.iterrows():
             d = {str(k).upper(): row[k] for k in df.columns}
@@ -1119,16 +1943,20 @@ def save_juros_wide(df, pasta: Path | None = None, ano: int | None = None) -> in
                 val = _to_float(d.get(col, 0))
                 if abs(val) < 0.0005:
                     continue
-                conn.execute(
+                c.execute(
                     "INSERT OR REPLACE INTO juros (ano, mes, valor) VALUES (?,?,?)",
                     (ano, mes, val),
                 )
                 n += 1
         return n
-
+    if conn is not None:
+        return _do(conn)
+    create_schema(pasta)
+    with get_connection(pasta) as c:
+        return _do(c)
 
 def load_juros_wide(pasta: Path | None = None, ano: int | None = None):
-    pasta = pasta or PASTA_CORRENTE
+    pasta = resolver_pasta(pasta)
     ano = ano or _ano_exercicio(pasta)
     fields = ["JUROS"] + MESES_COLS + ["TOTAL"]
     with get_connection(pasta) as conn:
@@ -1145,17 +1973,17 @@ def load_juros_wide(pasta: Path | None = None, ano: int | None = None):
         row["TOTAL"] = total
         return [row], fields
 
-
 # ---------------------------------------------------------------------------
 # Saldos / Balanço (linhas ordenadas — fidelidade total ao formato legado)
 # ---------------------------------------------------------------------------
 
-def save_linhas_tabela(df, tabela_linhas: str, pasta: Path | None = None) -> int:
-    """Grava DataFrame com CONTA/TIPO/VALOR numa tabela de linhas ordenadas."""
-    pasta = pasta or PASTA_CORRENTE
-    create_schema(pasta)
-    with get_connection(pasta) as conn:
-        conn.execute(f"DELETE FROM {tabela_linhas}")
+def save_linhas_tabela(df, tabela_linhas: str, pasta: Path | None = None, conn=None) -> int:
+    """Grava DataFrame com CONTA/TIPO/VALOR numa tabela de linhas ordenadas.
+    Se `conn` for fornecido, usa essa conexão (não faz commit/rollback).
+    """
+    pasta = resolver_pasta(pasta)
+    def _do(c):
+        c.execute(f"DELETE FROM {tabela_linhas}")
         n = 0
         for ordem, (_, row) in enumerate(df.iterrows()):
             d = {str(k).upper(): row[k] for k in df.columns}
@@ -1164,17 +1992,21 @@ def save_linhas_tabela(df, tabela_linhas: str, pasta: Path | None = None) -> int
             valor = _to_float(d.get("VALOR", 0))
             conta_s = "" if conta is None else str(conta)
             tipo_s = "" if tipo is None else str(tipo)
-            conn.execute(
+            c.execute(
                 f"INSERT INTO {tabela_linhas} (ordem, conta, tipo, valor) VALUES (?,?,?,?)",
                 (ordem, conta_s, tipo_s, valor),
             )
             n += 1
         return n
-
+    if conn is not None:
+        return _do(conn)
+    create_schema(pasta)
+    with get_connection(pasta) as c:
+        return _do(c)
 
 def load_linhas_tabela(tabela_linhas: str, pasta: Path | None = None):
     """Devolve (rows legado CONTA/TIPO/VALOR, fields)."""
-    pasta = pasta or PASTA_CORRENTE
+    pasta = resolver_pasta(pasta)
     create_schema(pasta)
     fields = ["CONTA", "TIPO", "VALOR"]
     with get_connection(pasta) as conn:
@@ -1197,47 +2029,29 @@ def load_linhas_tabela(tabela_linhas: str, pasta: Path | None = None):
             })
         return out, fields
 
-
-def save_saldos_wide(df, pasta: Path | None = None) -> int:
-    return save_linhas_tabela(df, "saldos_linhas", pasta)
-
+def save_saldos_wide(df, pasta: Path | None = None, conn=None) -> int:
+    return save_linhas_tabela(df, "saldos_linhas", pasta, conn=conn)
 
 def load_saldos_wide(pasta: Path | None = None):
     return load_linhas_tabela("saldos_linhas", pasta)
 
-
-def save_balanco_wide(df, pasta: Path | None = None) -> int:
-    return save_linhas_tabela(df, "balanco_linhas", pasta)
-
+def save_balanco_wide(df, pasta: Path | None = None, conn=None) -> int:
+    return save_linhas_tabela(df, "balanco_linhas", pasta, conn=conn)
 
 def load_balanco_wide(pasta: Path | None = None):
     return load_linhas_tabela("balanco_linhas", pasta)
 
-
 # ===========================================================================
-# API de compatibilidade wide / path-based (ex-Commons bridge)
-# ---------------------------------------------------------------------------
-# carregar_db / salvar_db / existe_dados / carregar_contas
-# Leitura e escrita exclusivas em condominio.db.
-# O "path" lógico (.../ReceitasN, .../Bancos) só identifica a tabela (stem)
-# e a pasta de dados (parent).
+# Utilitários de pasta / backup
 # ===========================================================================
 
+def existe_dados(caminho=None) -> bool:
+    """True se a pasta (ou parent do path) contém condominio.db."""
+    return db_existe(caminho)
 
-def existe_dados(caminho) -> bool:
-    """True se a pasta (ou parent do path lógico) contém condominio.db."""
-    p = Path(caminho)
-    if (p.parent / "condominio.db").exists():
-        return True
-    if p.is_dir() and (p / "condominio.db").exists():
-        return True
-    return False
-
-
-def validar_db_existe(caminho) -> bool:
-    """Alias de existe_dados."""
-    return existe_dados(caminho)
-
+def validar_db_existe(caminho=None) -> bool:
+    """Alias de db_existe / existe_dados."""
+    return db_existe(caminho)
 
 def criar_backup_db(origem, destino) -> bool:
     """Copia um ficheiro de dados (backup simples)."""
@@ -1250,76 +2064,16 @@ def criar_backup_db(origem, destino) -> bool:
         return False
 
 # ---------------------------------------------------------------------------
-# Camada de dados 100% relacional (condominio.db)
+# Implementação interna: configs e condóminos (usada pela API canónica)
 # ---------------------------------------------------------------------------
 
-
-# Tabelas cujo storage canónico é condominio.db (fase actual da migração)
-_TABELAS_MOVIMENTOS = {"Bancos": "bancos", "Caixa": "caixa", "DPrazo": "dprazo"}
-_TABELAS_RELACIONAIS_ONLY = set(_TABELAS_MOVIMENTOS) | {"Configs", "Condominos", "ReceitasN", "ReceitasE", "Despesas", "Juros", "Saldos", "Balanco"}
-
-
-def _normalizar_nome_tabela(stem: str) -> str:
-    """Unifica variantes (ex.: Balanço → Balanco)."""
-    s = (stem or "").strip()
-    key = s.casefold().replace("ç", "c").replace("ã", "a")
-    if key in ("balanco", "balanço"):
-        return "Balanco"
-    if key.startswith("saldo"):
-        return "Saldos"
-    return s
-
-
-def _pasta_dados_de(path: Path) -> Path:
-
-    """Pasta de dados a partir de um path lógico (.../Bancos)."""
-    path = Path(path)
-    parent = path.parent
-    if parent.name and parent != path:
-        return parent
-    return PASTA_CORRENTE
-
-
-def _carregar_movimentos_relacional(table: str, pasta: Path):
-    """Lê movimentos de condominio.db no formato legado (chaves MAIÚSCULAS)."""
-    fonte = _TABELAS_MOVIMENTOS.get(table)
-    if not fonte:
-        return None
-    try:
-        from Database import movimentos as mov_repo, db_path, create_schema
-        if not db_path(pasta).exists():
-            return None
-        create_schema(pasta)
-        rows_rel = mov_repo(pasta).find(fonte=fonte)
-        if not rows_rel:
-            return [], ["DATA", "TIPO", "CONTA", "DESCRICAO", "VALOR", "SALDO", "OBSERVACAO"]
-        out = []
-        for r in rows_rel:
-            out.append({
-                "DATA": r["data"],
-                "TIPO": r["tipo"] or "",
-                # DEPOIS
-                "CONTA": r["conta"] or "",              #"CONTA": r["conta_nome"] if "conta_nome" in r.keys() else "", (corrigido)
-                "DESCRICAO": r["descricao"] or "",
-                "VALOR": r["valor"],
-                "SALDO": r["saldo"],
-                "OBSERVACAO": r["observacao"] or "",
-            })
-        fields = ["DATA", "TIPO", "CONTA", "DESCRICAO", "VALOR", "SALDO", "OBSERVACAO"]
-        return out, fields
-    except Exception as e:
-        print(f"  ℹ️  Leitura relacional {table}: {e}")
-        return None
-
-
 def _carregar_configs_relacional(pasta: Path):
-    """Lê configs de condominio.db no formato legado."""
+    """Lê configs de condominio.db (chaves MAIÚSCULAS)."""
     try:
-        from Database import configs as cfg_repo, db_path, create_schema
         if not db_path(pasta).exists():
             return None
         create_schema(pasta)
-        rows_rel = cfg_repo(pasta).all()
+        rows_rel = ConfigsRepo(pasta).all()
         out = []
         for r in rows_rel:
             out.append({
@@ -1332,56 +2086,35 @@ def _carregar_configs_relacional(pasta: Path):
         fields = ["CATEGORIA", "CHAVE", "VALOR", "TIPO", "DESCRICAO"]
         return out, fields
     except Exception as e:
-        print(f"  ℹ️  Leitura relacional Configs: {e}")
+        print(f"  ℹ️  Leitura configs: {e}")
         return None
 
-
-def _salvar_movimentos_relacional(df, table: str, pasta: Path) -> bool:
-    """Grava movimentos em condominio.db."""
-    fonte = _TABELAS_MOVIMENTOS.get(table)
-    if not fonte:
-        return False
-    try:
-        from Database import sync_movimentos_from_legacy_df
-        n = sync_movimentos_from_legacy_df(df, fonte, pasta)
-        print(f"  ✓ {n} movimentos gravados em condominio.db ({fonte})")
-        return True
-    except Exception as e:
-        print(f"  ✗ Escrita relacional {table}: {e}")
-        return False
-
-
 def _salvar_configs_relacional(df, pasta: Path) -> bool:
-    """Grava configs APENAS em condominio.db."""
+    """Grava configs em condominio.db."""
     try:
-        from Database import configs as cfg_repo, create_schema
         create_schema(pasta)
         rows = []
         for _, row in df.iterrows():
             d = {str(k).upper(): row[k] for k in df.columns}
             rows.append(d)
-        n = cfg_repo(pasta).replace_all(rows)
+        n = ConfigsRepo(pasta).replace_all(rows)
         print(f"  ✓ {n} configs gravadas em condominio.db")
         return True
     except Exception as e:
-        print(f"  ✗ Escrita relacional Configs: {e}")
+        print(f"  ✗ Escrita configs: {e}")
         return False
 
-
-# _carregar_contas_relacional removida na V5 (tabela contas eliminada)
-
-
 def _carregar_condominos_relacional(pasta: Path):
-    """Lê condóminos de condominio.db no formato legado (NOME, CHECK, ...)."""
+    """Lê condóminos de condominio.db (chaves MAIÚSCULAS)."""
     try:
-        from Database import condominos as condominos_repo, db_path, create_schema
         if not db_path(pasta).exists():
             return None
         create_schema(pasta)
-        rows_rel = condominos_repo(pasta).all()
+        rows_rel = CondominosRepo(pasta).all()
         out = []
         for r in rows_rel:
             out.append({
+                "ID": r["id"],
                 "NOME": r["nome"] or "",
                 "CHECK": bool(r["ativo"]),
                 "MORADA": r["morada"] or "",
@@ -1395,27 +2128,41 @@ def _carregar_condominos_relacional(pasta: Path):
                 "QUOTAN": r["quota_normal"] if r["quota_normal"] is not None else 0.0,
                 "QUOTAE": r["quota_extra"] if r["quota_extra"] is not None else 0.0,
                 "FOTO": r["foto"] or "",
-                "ADMIN": bool(r["admin"]),
+                # admin: 1 = atual, -1 = cessante (ex-admin), 0 = restante
+                "ADMIN": int(r["admin"] or 0),
+                "CC_NUMERO": str(r["cc_numero"] or "") if "cc_numero" in r.keys() else "",
+                "CC_VALIDADE": str(r["cc_validade"] or "") if "cc_validade" in r.keys() else "",
+                "NIF": str(r["nif"] or "") if "nif" in r.keys() else "",
             })
-        fields = ["NOME", "CHECK", "MORADA", "CPOSTAL", "CIDADE", "TELEMOVEL", "EMAIL",
-                  "FRACAO", "ANDAR", "PERMILAGEM", "QUOTAN", "QUOTAE", "FOTO", "ADMIN"]
+        fields = [
+            "ID", "NOME", "CHECK", "MORADA", "CPOSTAL", "CIDADE", "TELEMOVEL", "EMAIL",
+            "FRACAO", "ANDAR", "PERMILAGEM", "QUOTAN", "QUOTAE", "FOTO", "ADMIN",
+            "CC_NUMERO", "CC_VALIDADE", "NIF",
+        ]
         return out, fields
     except Exception as e:
-        print(f"  ℹ️  Leitura relacional Condominos: {e}")
+        print(f"  ℹ️  Leitura condóminos: {e}")
         return None
 
-
 def _salvar_condominos_relacional(df, pasta: Path) -> bool:
-    """Grava condóminos APENAS em condominio.db (upsert por fracção, preserva id/FKs)."""
+    """Grava condóminos em condominio.db.
+
+    Regista cada linha pelo `id` (quando já veio da BD, via `update_by_id`
+    — estável mesmo que a `fracao` tenha mudado/estivesse vazia). Só usa
+    `upsert` (procura por fracao) para linhas genuinamente novas, sem `id`
+    — ex.: condóminos criados no ecrã com "Adicionar Condómino".
+    """
     try:
-        from Database import condominos as condominos_repo, create_schema, _to_float as _to_float_rel
         create_schema(pasta)
-        repo = condominos_repo(pasta)
+        repo = CondominosRepo(pasta)
         n = 0
         for _, row in df.iterrows():
             d = {str(k).upper(): row[k] for k in df.columns}
             fracao = str(d.get("FRACAO") or "").strip()
-            if not fracao:
+            id_val = d.get("ID")
+            tem_id = id_val not in (None, "", "None")
+            if not fracao and not tem_id:
+                # Linha nova sem fracao e sem id: nada a identificar nem a gravar
                 continue
             check_val = d.get("CHECK")
             admin_val = d.get("ADMIN")
@@ -1428,270 +2175,38 @@ def _salvar_condominos_relacional(df, pasta: Path) -> bool:
                 "telemovel": str(d.get("TELEMOVEL") or "").strip(),
                 "email": str(d.get("EMAIL") or "").strip(),
                 "andar": str(d.get("ANDAR") or "").strip(),
-                "permilagem": _to_float_rel(d.get("PERMILAGEM", 0)),
-                "quota_normal": _to_float_rel(d.get("QUOTAN", 0)),
-                "quota_extra": _to_float_rel(d.get("QUOTAE", 0)),
+                "permilagem": _to_float(d.get("PERMILAGEM", 0)),
+                "quota_normal": _to_float(d.get("QUOTAN", 0)),
+                "quota_extra": _to_float(d.get("QUOTAE", 0)),
                 "foto": str(d.get("FOTO") or "").strip(),
-                # CHECK/ADMIN podem chegar como bool, 1/0, ".T."/".F." ou "T"/"F"
-                # consoante a origem (grelha da GUI ou bridge legado).
                 "ativo": 1 if check_val in (True, 1, "1", ".T.", "T", "t", "True") else 0,
-                "admin": 1 if admin_val in (True, 1, "1", ".T.", "T", "t", "True") else 0,
+                # admin: 1 = atual, -1 = cessante, 0 = outros
+                "admin": _normalizar_admin(admin_val),
+                "cc_numero": str(d.get("CC_NUMERO") or "").strip(),
+                "cc_validade": str(d.get("CC_VALIDADE") or "").strip(),
+                "nif": str(d.get("NIF") or "").strip(),
             }
-            repo.upsert(data)
+            if tem_id:
+                repo.update_by_id(int(id_val), data)
+            else:
+                if not fracao:
+                    continue
+                repo.upsert(data)
             n += 1
         print(f"  ✓ {n} condóminos gravados em condominio.db")
         return True
     except Exception as e:
-        print(f"  ✗ Escrita relacional Condominos: {e}")
-        import traceback; traceback.print_exc()
+        print(f"  ✗ Escrita condóminos: {e}")
+        import traceback
+        traceback.print_exc()
         return False
-
-
-# _salvar_contas_relacional removida na V5 (tabela contas eliminada)
-
-
-def _carregar_receitas_relacional(table: str, pasta: Path):
-    tipo = "NORMAL" if table == "ReceitasN" else "EXTRA"
-    try:
-        from Database import load_receitas_wide, db_path, create_schema
-        if not db_path(pasta).exists():
-            return None
-        create_schema(pasta)
-        rows, fields = load_receitas_wide(tipo, pasta)
-        return rows, fields
-    except Exception as e:
-        print(f"  ℹ️  Leitura relacional {table}: {e}")
-        return None
-
-
-def _salvar_receitas_relacional(df, table: str, pasta: Path) -> bool:
-    tipo = "NORMAL" if table == "ReceitasN" else "EXTRA"
-    try:
-        from Database import save_receitas_wide, create_schema
-        create_schema(pasta)
-        n = save_receitas_wide(df, tipo, pasta)
-        print(f"  ✓ {n} valores mensais ({tipo}) gravados em condominio.db")
-        return True
-    except Exception as e:
-        print(f"  ✗ Escrita relacional {table}: {e}")
-        import traceback; traceback.print_exc()
-        return False
-
-
-def _carregar_despesas_relacional(pasta: Path):
-    try:
-        from Database import load_despesas_wide, db_path, create_schema
-        if not db_path(pasta).exists():
-            return None
-        create_schema(pasta)
-        return load_despesas_wide(pasta)
-    except Exception as e:
-        print(f"  ℹ️  Leitura relacional Despesas: {e}")
-        return None
-
-
-def _salvar_despesas_relacional(df, pasta: Path) -> bool:
-    try:
-        from Database import save_despesas_wide, create_schema
-        create_schema(pasta)
-        n = save_despesas_wide(df, pasta)
-        print(f"  ✓ {n} valores mensais de despesas gravados em condominio.db")
-        return True
-    except Exception as e:
-        print(f"  ✗ Escrita relacional Despesas: {e}")
-        import traceback; traceback.print_exc()
-        return False
-
-
-def _carregar_juros_relacional(pasta: Path):
-    try:
-        from Database import load_juros_wide, db_path, create_schema
-        if not db_path(pasta).exists():
-            return None
-        create_schema(pasta)
-        return load_juros_wide(pasta)
-    except Exception as e:
-        print(f"  ℹ️  Leitura relacional Juros: {e}")
-        return None
-
-
-def _salvar_juros_relacional(df, pasta: Path) -> bool:
-    try:
-        from Database import save_juros_wide, create_schema
-        create_schema(pasta)
-        n = save_juros_wide(df, pasta)
-        print(f"  ✓ {n} valores de juros gravados em condominio.db")
-        return True
-    except Exception as e:
-        print(f"  ✗ Escrita relacional Juros: {e}")
-        return False
-
-
-def _carregar_saldos_relacional(pasta: Path):
-    try:
-        from Database import load_saldos_wide, db_path, create_schema
-        if not db_path(pasta).exists():
-            return None
-        create_schema(pasta)
-        return load_saldos_wide(pasta)
-    except Exception as e:
-        print(f"  ℹ️  Leitura relacional Saldos: {e}")
-        return None
-
-
-def _salvar_saldos_relacional(df, pasta: Path) -> bool:
-    try:
-        from Database import save_saldos_wide, create_schema
-        create_schema(pasta)
-        n = save_saldos_wide(df, pasta)
-        print(f"  ✓ {n} linhas de Saldos gravadas em condominio.db")
-        return True
-    except Exception as e:
-        print(f"  ✗ Escrita relacional Saldos: {e}")
-        import traceback; traceback.print_exc()
-        return False
-
-
-def _carregar_balanco_relacional(pasta: Path):
-    try:
-        from Database import load_balanco_wide, db_path, create_schema
-        if not db_path(pasta).exists():
-            return None
-        create_schema(pasta)
-        return load_balanco_wide(pasta)
-    except Exception as e:
-        print(f"  ℹ️  Leitura relacional Balanco: {e}")
-        return None
-
-
-def _salvar_balanco_relacional(df, pasta: Path) -> bool:
-    try:
-        from Database import save_balanco_wide, create_schema
-        create_schema(pasta)
-        n = save_balanco_wide(df, pasta)
-        print(f"  ✓ {n} linhas de Balanço gravadas em condominio.db")
-        return True
-    except Exception as e:
-        print(f"  ✗ Escrita relacional Balanco: {e}")
-        import traceback; traceback.print_exc()
-        return False
-
-
-def carregar_db(path):
-    """
-    Leitura exclusiva de condominio.db (API de compatibilidade).
-
-    - Bancos / Caixa / DPrazo → condominio.db.movimentos
-    - Configs → condominio.db.configs
-    - Contas → condominio.db.contas
-    - Condominos, ReceitasN/E, Despesas, Juros, Saldos, Balanco → tabelas relacionais
-
-    O argumento `path` só serve para obter o nome lógico da tabela (stem)
-    e a pasta de dados (parent). Apenas condominio.db é utilizado.
-
-    Retorna: (lista_de_dicts_com_chaves_MAIUSCULAS, lista_de_campos)
-    """
-    path = Path(path)
-    table = _normalizar_nome_tabela(path.stem)
-    pasta = _pasta_dados_de(path)
-
-    if table in _TABELAS_MOVIMENTOS:
-        result = _carregar_movimentos_relacional(table, pasta)
-        if result is not None:
-            return result
-    elif table == "Configs":
-        result = _carregar_configs_relacional(pasta)
-        if result is not None:
-            return result
-    # tabela Contas eliminada na V5
-    elif table == "Condominos":
-        result = _carregar_condominos_relacional(pasta)
-        if result is not None:
-            return result
-    elif table in ("ReceitasN", "ReceitasE"):
-        result = _carregar_receitas_relacional(table, pasta)
-        if result is not None:
-            return result
-    elif table == "Despesas":
-        result = _carregar_despesas_relacional(pasta)
-        if result is not None:
-            return result
-    elif table == "Juros":
-        result = _carregar_juros_relacional(pasta)
-        if result is not None:
-            return result
-    elif table == "Saldos":
-        result = _carregar_saldos_relacional(pasta)
-        if result is not None:
-            return result
-    elif table == "Balanco":
-        result = _carregar_balanco_relacional(pasta)
-        if result is not None:
-            return result
-    else:
-        print(f"  ⚠️ Tabela desconhecida para leitura: {table}")
-
-    return [], []
-
-
-def salvar_db(df, path, field_specs=None):
-    """
-    Escrita exclusiva em condominio.db (API de compatibilidade).
-
-    - Bancos / Caixa / DPrazo → condominio.db.movimentos
-    - Configs, Contas, Condominos, ReceitasN/E, Despesas, Juros, Saldos, Balanco
-      → tabelas relacionais correspondentes
-
-    O argumento `path` só serve para obter o nome lógico da tabela (stem)
-    e a pasta de dados (parent). Apenas condominio.db é utilizado.
-    `field_specs` é ignorado (mantido por compatibilidade de assinatura).
-    """
-    path = Path(path)
-    table = _normalizar_nome_tabela(path.stem)
-    pasta = _pasta_dados_de(path)
-
-    if table in _TABELAS_MOVIMENTOS:
-        return _salvar_movimentos_relacional(df, table, pasta)
-
-    if table == "Configs":
-        return _salvar_configs_relacional(df, pasta)
-
-    if table == "Contas":
-        return _salvar_contas_relacional(df, pasta)
-
-    if table == "Condominos":
-        return _salvar_condominos_relacional(df, pasta)
-
-    if table in ("ReceitasN", "ReceitasE"):
-        return _salvar_receitas_relacional(df, table, pasta)
-
-    if table == "Despesas":
-        return _salvar_despesas_relacional(df, pasta)
-
-    if table == "Juros":
-        return _salvar_juros_relacional(df, pasta)
-
-    if table == "Saldos":
-        return _salvar_saldos_relacional(df, pasta)
-
-    if table == "Balanco":
-        return _salvar_balanco_relacional(df, pasta)
-
-    print(f"  ⚠️ Tabela desconhecida para escrita: {table}")
-    return False
-
-
 
 def carregar_contas(pasta_dados):
     """
-    V5: contas vêm directamente da tabela regras (campo conta, distinto).
+    Contas distintas a partir da tabela regras.
     Retorna: (lista_receitas, lista_despesas, todas_contas)
     """
-    if isinstance(pasta_dados, str):
-        pasta = Path(pasta_dados)
-    else:
-        pasta = Path(pasta_dados)
-
+    pasta = resolver_pasta(pasta_dados)
     receitas, despesas, todas = [], [], []
     try:
         repo = RegrasRepo(pasta)
@@ -1709,8 +2224,15 @@ def carregar_contas(pasta_dados):
         print(f"⚠️ Erro ao carregar contas de regras: {exc}")
     return receitas, despesas, todas
 
+# ---------------------------------------------------------------------------
+# Caminhos (definidos em Commons.py — import no fim para evitar ciclo)
+# ---------------------------------------------------------------------------
+from Commons import BASE_DIR, PASTA_CORRENTE, PASTA_HISTORICO, DB_NAME, db_path  # noqa: E402
 
-# --- Aliases canónicos ---
-load_table = carregar_db
-save_table = salvar_db
-has_data = existe_dados
+# API canónica pública:
+#   resolver_pasta, db_existe, existe_dados, ano_exercicio,
+#   quotas_por_fracao, regras_condominos_lista,
+#   movimentos_dataframe, aglutinar_movimentos,
+#   carregar/guardar_movimentos_fonte,
+#   carregar/guardar_condominos, carregar/guardar_configs,
+#   load/save_*_wide, carregar_contas, repos (MovimentosRepo, …)

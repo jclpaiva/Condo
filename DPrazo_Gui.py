@@ -24,11 +24,18 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QVariant, QSize, QTimer
 from PyQt6.QtGui import QColor, QBrush, QIcon
 
-# Importa código compartilhado
+# Constantes / utilitários / delegates
 from Commons import (
     BASE_DIR, ICONS_DIR, PASTA_CORRENTE, PASTA_HISTORICO,
-    ContaComboBoxDelegate, carregar_contas, carregar_db,
-    clean_numeric, format_currency, salvar_db, existe_dados
+    ContaComboBoxDelegate,
+    clean_numeric, format_currency,
+)
+# Acesso a dados → Database
+from Database import (
+    resolver_pasta,
+    carregar_movimentos_fonte,
+    guardar_movimentos_fonte,
+    carregar_contas,
 )
 
 
@@ -140,13 +147,13 @@ class DPrazoTableModel(QAbstractTableModel):
             if col == 0:  # Data
                 try:
                     value = datetime.strptime(value, "%d-%m-%Y")
-                except:
+                except Exception:
                     return False
             elif col in (4, 5):  # Valor, Saldo
                 try:
                     # Remove €, espaços e vírgulas (separadores de milhares no formato americano)
                     value = float(str(value).replace("€", "").replace(" ", "").replace(",", ""))
-                except:
+                except Exception:
                     return False
             
             row_dict[key] = value
@@ -220,67 +227,59 @@ class DPrazoTableModel(QAbstractTableModel):
         self.layoutChanged.emit()
 
     def load_from_db(self, caminho):
-        """Carrega dados de DPrazo ou do SQLite compatível do diretório."""
+        """Carrega movimentos DPrazo via API canónica (fonte=dprazo)."""
         self.beginResetModel()
         self._data = []
-        path = Path(caminho)
-        
-        if existe_dados(path):
-            try:
-                rows, _ = carregar_db(path)
-                for rec in rows:
-                    raw_data = rec.get('DATA')
-                    if isinstance(raw_data, str):
-                        try:
-                            data = datetime.fromisoformat(raw_data[:10])
-                        except Exception:
-                            data = datetime(1900, 1, 1)
-                    elif raw_data is None:
-                        data = datetime(1900, 1, 1)
-                    else:
-                        data = raw_data
-
-                    self._data.append({
-                        'DATA': data,
-                        'TIPO': str(rec.get('TIPO', '')).strip(),
-                        'CONTA': str(rec.get('CONTA', '')).strip(),
-                        'DESCRICAO': str(rec.get('DESCRICAO', '')).strip(),
-                        'VALOR': float(rec.get('VALOR') or 0.0),
-                        'SALDO': float(rec.get('SALDO') or 0.0),
-                        'OBSERVACAO': str(rec.get('OBSERVACAO', '')).strip()
-                    })
-            except Exception as exc:
-                print(f"❌ Erro ao carregar {path.name}: {exc}")
-        
-        self.endResetModel()
-    
-    def save_to_db(self, caminho):
-        """Salva alterações usando o bridge compatível comum do projeto."""
         try:
+            pasta = resolver_pasta(caminho)
+            rows = carregar_movimentos_fonte(pasta, "dprazo")
+            for rec in rows:
+                raw_data = rec.get("DATA")
+                if isinstance(raw_data, str):
+                    try:
+                        data = datetime.fromisoformat(raw_data[:10])
+                    except Exception:
+                        data = datetime(1900, 1, 1)
+                elif raw_data is None:
+                    data = datetime(1900, 1, 1)
+                else:
+                    data = raw_data
+                self._data.append({
+                    "DATA": data,
+                    "TIPO": str(rec.get("TIPO", "")).strip(),
+                    "CONTA": str(rec.get("CONTA", "")).strip(),
+                    "DESCRICAO": str(rec.get("DESCRICAO", "")).strip(),
+                    "VALOR": float(rec.get("VALOR") or 0.0),
+                    "SALDO": float(rec.get("SALDO") or 0.0),
+                    "OBSERVACAO": str(rec.get("OBSERVACAO", "")).strip(),
+                })
+        except Exception as exc:
+            print(f"❌ Erro ao carregar dprazo: {exc}")
+        self.endResetModel()
+
+    def save_to_db(self, caminho):
+        """Guarda movimentos DPrazo via API canónica (sem field_specs)."""
+        try:
+            pasta = resolver_pasta(caminho)
             rows = []
             for row_data in self._data:
-                data_obj = row_data['DATA']
+                data_obj = row_data["DATA"]
                 if isinstance(data_obj, datetime):
                     data_value = data_obj.date()
-                elif hasattr(data_obj, 'date'):
+                elif hasattr(data_obj, "date"):
                     data_value = data_obj.date()
                 else:
                     data_value = datetime(1900, 1, 1).date()
-
                 rows.append({
-                    'DATA': data_value,
-                    'TIPO': str(row_data['TIPO'])[:10],
-                    'CONTA': str(row_data['CONTA'])[:30],
-                    'DESCRICAO': str(row_data['DESCRICAO'])[:30],
-                    'VALOR': float(row_data['VALOR']),
-                    'SALDO': float(row_data['SALDO']),
-                    'OBSERVACAO': str(row_data['OBSERVACAO'])[:30]
+                    "DATA": data_value,
+                    "TIPO": str(row_data["TIPO"])[:10],
+                    "CONTA": str(row_data["CONTA"])[:30],
+                    "DESCRICAO": str(row_data["DESCRICAO"])[:30],
+                    "VALOR": float(row_data["VALOR"]),
+                    "SALDO": float(row_data["SALDO"]),
+                    "OBSERVACAO": str(row_data["OBSERVACAO"])[:30],
                 })
-
-            df = pd.DataFrame(rows, dtype=object)
-            field_specs = 'DATA D; TIPO C(10); CONTA C(30); DESCRICAO C(30); VALOR N(10,2); SALDO N(10,2); OBSERVACAO C(30)'
-            return salvar_db(df, caminho, field_specs)
-
+            return guardar_movimentos_fonte(rows, pasta=pasta, fonte="dprazo")
         except Exception as e:
             print(f"❌ Erro ao guardar DPrazo: {e}")
             return False
@@ -408,11 +407,13 @@ class DPrazoWidget(QWidget):
     
     def set_pasta_dados(self, pasta_dados):
         """Define pasta de dados e carrega contas + tabela"""
+        from Commons import pasta_de_dados
         self.pasta_dados = pasta_dados
-        self.caminho_dprazo_db = BASE_DIR / pasta_dados / "DPrazo"
+        self.pasta = pasta_de_dados(pasta_dados)
+        self.caminho_dprazo_db = self.pasta  # alias: pasta real, não …/DPrazo
         
         # Carrega contas
-        receitas, despesas, todas = carregar_contas(pasta_dados)
+        receitas, despesas, todas = carregar_contas(self.pasta)
         
         if not todas:
             QMessageBox.warning(
@@ -489,7 +490,7 @@ class DPrazoWidget(QWidget):
         self.model.recalculate_saldos()
         
         if self.model.save_to_db(str(self.caminho_dprazo_db)):
-            QMessageBox.information(self, "Sucesso", "Alterações guardadas com sucesso!")
+            QMessageBox.information(self, "Sucesso", "<br><b>Alterações guardadas com sucesso!</b>")
             self.carregar_tabela()
         else:
             QMessageBox.critical(self, "Erro", "Erro ao guardar alterações.")

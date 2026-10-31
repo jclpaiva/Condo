@@ -9,29 +9,42 @@ Funcionalidades:
 - Tooltip no ANDAR para ver pagamentos
 - Validações de campos
 - Guardar alterações
-- ComboBox para campo ANDAR
+- ComboBox na coluna FRAÇÃO (chave canónica); ANDAR e PERMILAGEM são derivados
+- Clique esquerdo na coluna ANDAR: consultar pagamentos de quotas / imprimir
 - Checkbox para campo CHECK (verde quando ativa, vermelha quando inativa)
-- Dialogue de pagamentos com combobox de seleção administrador
-- Icon de administrador atualiza em tempo real na combobox do dialogue de pagamentos
+- Diálogo de pagamentos: administrador só para visualização (impressão de recibo)
+- Clique direito no nome na grelha: definir administrador em funções
 """
 
 import sys
 from pathlib import Path
-from datetime import datetime
-import pandas as pd
 import re
+import shutil
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableView, QHeaderView, QMessageBox, QStatusBar,
     QLabel, QApplication, QItemDelegate, QComboBox, QStyledItemDelegate, QMenu, QDialog, QTableWidget,
-    QTableWidgetItem, QFrame, QGridLayout, QGraphicsOpacityEffect
+    QTableWidgetItem, QFrame, QGridLayout, QGraphicsOpacityEffect, QFileDialog,
+    QLineEdit, QFormLayout, QDialogButtonBox, QStyle,
 )
-from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QVariant, QSize, QEvent, QPoint, QPropertyAnimation, QSequentialAnimationGroup, QEasingCurve, pyqtSignal
-from PyQt6.QtGui import QColor, QBrush, QIcon, QPixmap, QCursor, QPen
+from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QVariant, QSize, QEvent, QPoint, QPropertyAnimation, QSequentialAnimationGroup, QEasingCurve, pyqtSignal, QRect
+from PyQt6.QtGui import QColor, QBrush, QIcon, QPixmap, QCursor, QPen, QPainter
 
+# Constantes / utilitários
 from Commons import (
     BASE_DIR, ICONS_DIR, PASTA_CORRENTE, PASTA_HISTORICO,
-    FOTOS_DIR, clean_numeric, format_currency, carregar_db, salvar_db, existe_dados
+    FOTOS_DIR, clean_numeric, format_currency,
 )
+try:
+    from Commons import pasta_e_corrente
+except ImportError:
+    # Fallback se Commons ainda não tiver a função (versão antiga)
+    def pasta_e_corrente(pasta_dados=None) -> bool:
+        if pasta_dados is None or str(pasta_dados).strip() in ("", "corrente"):
+            return True
+        s = str(pasta_dados).replace("\\", "/").strip().lower()
+        return "historico" not in s.split("/") and (
+            s == "corrente" or s.endswith("/corrente")
+        )
 
 # Importar módulo de impressão de recibos
 from Imprimir_Recibo import gerar_recibo_pdf, obter_iniciais
@@ -41,17 +54,35 @@ from Imprimir_Recibos import gerar_recibos_para_todos_condominos
 
 # Importar lógica de negócio
 from Condominos import (
-    carregar_condominos_db, 
+    carregar_condominos_db,
     guardar_condominos_db,
     validar_condominos,
-    atualizar_quotas_configs,
+    atualizar_quotas_regras,
     obter_pagamentos_condomino,
     criar_novo_condomino,
     obter_lista_administradores,
     definir_administrador,
+    obter_fracoes,
+    eh_admin_atual,
+    validar_e_normalizar_campo,
+    sincronizar_por_fracao,
+    construir_mapas_fracoes,
+    reconciliar_com_fracoes,
+    calcular_meses_quotas,
+    calcular_estado_atraso,
+    condominos_ativos_na_fracao,
     MORADA_FIXA,
     CPOSTAL_FIXO,
-    CIDADE_FIXA
+    CIDADE_FIXA,
+)
+
+# Importar módulo WhatsApp
+from WhatsApp import (
+    enviar_whatsapp_a_todos_atrasados,
+    enviar_whatsapp_a_condomino,
+    abrir_whatsapp,
+    montar_mensagem_atraso,
+    formatar_numero_wa,
 )
 
 
@@ -91,8 +122,9 @@ class CheckBoxDelegate(QStyledItemDelegate):
             # Linha selecionada - usar cor de highlight (azul)
             painter.fillRect(option.rect, option.palette.highlight())
         else:
-            # Linha não selecionada - usar cor neutra
-            painter.fillRect(option.rect, option.palette.base())
+            # Manter o destaque amarelo das linhas com alterações por gravar.
+            fundo = index.data(Qt.ItemDataRole.BackgroundRole)
+            painter.fillRect(option.rect, fundo if fundo else option.palette.base())
         
         # Desenhar caixinha quadrada no centro
         box_size = 16
@@ -135,12 +167,12 @@ class CheckBoxDelegate(QStyledItemDelegate):
 # ====================================================================
 class NomeComAdminDelegate(QStyledItemDelegate):
     """
-    Delegate que mostra nome com ícone de admin ao lado se ADMIN = .T.
-    
-    NOTA: O ícone é apenas VISUAL (somente leitura).
-    Para alterar o administrador, use a ComboBox no dialog de pagamentos.
+    Delegate que mostra nome com ícone de admin ao lado se ADMIN == 1.
+
+    NOTA: O ícone é apenas VISUAL. Para alterar o administrador em funções,
+    clique com o botão direito sobre o nome na grelha.
     """
-    
+            
     def __init__(self, parent=None):
         super().__init__(parent)
         # Carregar o ícone uma vez no construtor
@@ -172,22 +204,25 @@ class NomeComAdminDelegate(QStyledItemDelegate):
             # Obter valor do campo ADMIN do modelo
             model = index.model()
             row = index.row()
+            font = painter.font()
+            font.setBold(bool(option.state & QStyle.StateFlag.State_Selected))
+            painter.setFont(font)
             
-            # Verificar se é administrador (buscar diretamente dos dados)
+            # Verificar se é administrador atual (admin == 1; -1 = cessante)
             is_admin = False
             try:
-                if row < len(model._data):
-                    admin_value = model._data[row].get('ADMIN', '.F.')
-                    is_admin = admin_value in (True, 'T', '.T.', 't')
-            except (IndexError, AttributeError, KeyError):
+                if hasattr(model, "_data") and row < len(model._data):
+                    admin_value = model._data[row].get("ADMIN", 0)
+                    is_admin = eh_admin_atual(admin_value)
+            except (IndexError, AttributeError, KeyError, TypeError):
                 is_admin = False
-            
+
             # Preencher fundo da célula
-            from PyQt6.QtWidgets import QStyle
             if option.state & QStyle.StateFlag.State_Selected:
                 painter.fillRect(option.rect, option.palette.highlight())
             else:
-                painter.fillRect(option.rect, option.palette.base())
+                fundo = index.data(Qt.ItemDataRole.BackgroundRole)
+                painter.fillRect(option.rect, fundo if fundo else option.palette.base())
             
             # Obter o texto do nome
             nome = str(model.data(index, Qt.ItemDataRole.DisplayRole))
@@ -225,31 +260,68 @@ class NomeComAdminDelegate(QStyledItemDelegate):
 
 
 # ====================================================================
-# DELEGATE PARA COMBOBOX DO ANDAR
+# DELEGATE PARA COMBOBOX DA FRAÇÃO (chave canónica)
 # ====================================================================
-class AndarComboDelegate(QStyledItemDelegate):
-    """Delegate que mostra ComboBox para o campo ANDAR"""
-    
+class FracaoComboDelegate(QStyledItemDelegate):
+    """ComboBox para o campo FRACAO.
+
+    Os valores vêm exclusivamente da tabela `fracoes` (sem fallbacks
+    inventados). Abre com **um clique** e expande a lista de imediato.
+    Se o valor actual do modelo não estiver na lista (dados legados), é
+    mostrado temporariamente para não forçar outra fração por engano.
+    """
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.items = ["R/c Esq.", "R/c Dto.", "1º Esq.", "1º Dto.", "2º Esq.", "2º Dto."]
-    
+        self.items = []  # preenchido por set_items a partir de `fracoes`
+
+    def set_items(self, items):
+        """Actualiza a lista de frações (letras) vindas da tabela `fracoes`."""
+        self.items = [str(x).strip().upper() for x in (items or []) if str(x).strip()]
+
     def createEditor(self, parent, option, index):
+        from PyQt6.QtCore import QTimer
+
         combo = QComboBox(parent)
-        combo.addItems(self.items)
         combo.setEditable(False)
+        combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        for item in self.items:
+            combo.addItem(item)
+        # Commit imediato ao escolher um item da lista
+        combo.activated.connect(lambda _i, c=combo: self._commit_and_close(c))
+        # Expandir a lista assim que o editor estiver no ecrã
+        QTimer.singleShot(0, combo.showPopup)
         return combo
-    
+
+    def _commit_and_close(self, editor):
+        self.commitData.emit(editor)
+        self.closeEditor.emit(editor, QStyledItemDelegate.EndEditHint.NoHint)
+
     def setEditorData(self, editor, index):
-        value = index.model().data(index, Qt.ItemDataRole.EditRole)
-        if value in self.items:
+        value = str(index.model().data(index, Qt.ItemDataRole.EditRole) or '').strip().upper()
+        # Valor legado fora da lista: mostrar sem substituir por outro
+        if value and editor.findText(value) < 0:
+            editor.insertItem(0, value)
+        if value:
             editor.setCurrentText(value)
         else:
-            editor.setCurrentIndex(0)
-    
+            editor.setCurrentIndex(-1)  # obrigar escolha explícita
+
     def setModelData(self, editor, model, index):
-        value = editor.currentText()
-        model.setData(index, value, Qt.ItemDataRole.EditRole)
+        value = editor.currentText().strip().upper()
+        if value:
+            model.setData(index, value, Qt.ItemDataRole.EditRole)
+
+    def editorEvent(self, event, model, option, index):
+        """Abre o editor no primeiro clique (sem precisar de seleccionar antes)."""
+        if (event.type() == QEvent.Type.MouseButtonPress and
+                event.button() == Qt.MouseButton.LeftButton):
+            view = self.parent()
+            if isinstance(view, QTableView):
+                view.setCurrentIndex(index)
+                view.edit(index)
+                return True
+        return super().editorEvent(event, model, option, index)
 
 
 # ====================================================================
@@ -291,7 +363,8 @@ class PagamentosQuotasDialog(QDialog):
     """Dialog para exibir pagamentos de quotas do condómino"""
     
     def __init__(self, nome, andar, fracao, quota_normal, quota_extra, 
-                 dados_pagamentos, pasta_dados=None, parent=None):
+                 dados_pagamentos, pasta_dados=None, telemovel="",
+                 outros_na_fracao=None, parent=None):
         super().__init__(parent)
         
         self.nome = nome
@@ -301,6 +374,12 @@ class PagamentosQuotasDialog(QDialog):
         self.quota_extra = quota_extra
         self.dados = dados_pagamentos
         self.pasta_dados = pasta_dados
+        self.telemovel = str(telemovel or "").strip()
+        # Outros condóminos ATIVOS que partilham o mesmo ANDAR (normalmente
+        # vazio; só preenchido numa situação de transição, ex. venda a meio
+        # do ano — ver condominos_ativos_na_fracao). Os valores de pagamento
+        # são calculados por ANDAR, por isso o atraso pode estar agregado.
+        self.outros_na_fracao = outros_na_fracao or []
         
         self.setup_ui()
     
@@ -328,29 +407,38 @@ class PagamentosQuotasDialog(QDialog):
         layout.addWidget(footer)
         
         # ====================================================================
-        # LAYOUT HORIZONTAL: Administrador + Botões
+        # LAYOUT HORIZONTAL: Administrador (só leitura) + Botões
         # ====================================================================
         bottom_layout = QHBoxLayout()
         bottom_layout.setSpacing(10)
         
-        # ESQUERDA: Administrador
+        # ESQUERDA: Administrador em funções (não editável neste ecrã)
         lbl_admin = QLabel("Administrador:")
         lbl_admin.setStyleSheet("font-size: 12px; font-weight: bold;")
         bottom_layout.addWidget(lbl_admin)
-        
-        self.combo_administrador = QComboBox()
-        self.combo_administrador.setStyleSheet("""
-            QComboBox {
-                padding: 6px;
+
+        self.administrador_nome = self._obter_nome_administrador_atual()
+        texto_admin = (
+            f"👑 {self.administrador_nome}"
+            if self.administrador_nome else
+            "— (não definido)"
+        )
+        self.lbl_administrador = QLabel(texto_admin)
+        self.lbl_administrador.setStyleSheet("""
+            QLabel {
+                padding: 6px 10px;
                 border: 1px solid #ccc;
                 border-radius: 4px;
                 font-size: 11px;
-                min-width: 250px;
+                background-color: #f5f5f5;
+                min-width: 220px;
             }
         """)
-        self.combo_administrador.setToolTip("Clique para alterar o administrador")
-        self.carregar_administradores()
-        bottom_layout.addWidget(self.combo_administrador)
+        self.lbl_administrador.setToolTip(
+            "Administrador em funções (só leitura).\n"
+            "Para alterar: na grelha de Condóminos, clique com o botão direito sobre o nome."
+        )
+        bottom_layout.addWidget(self.lbl_administrador)
         
         # ESPAÇO NO MEIO
         bottom_layout.addStretch()
@@ -602,10 +690,12 @@ class PagamentosQuotasDialog(QDialog):
         lbl_total.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(lbl_total, 2, 1)
         
-        # Calcular esperado e saldo
+        # Calcular esperado anual e saldo de controlo (visão do ano completo,
+        # inclui meses futuros ainda não vencidos — útil para passagem de
+        # saldos no final do ano, mas NÃO indica atraso real)
         esperado_anual = (self.quota_normal * 12) + (self.quota_extra * 12)
         saldo = self.dados['total_geral'] - esperado_anual
-        
+
         lbl_esperado_desc = QLabel("<b>Esperado Anual:</b>")
         lbl_esperado_desc.setStyleSheet("font-size: 12px;")
         layout.addWidget(lbl_esperado_desc, 2, 2)
@@ -615,34 +705,105 @@ class PagamentosQuotasDialog(QDialog):
         lbl_esperado.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(lbl_esperado, 2, 3)
         
-        # Saldo
-        lbl_saldo_desc = QLabel("<b>Saldo:</b>")
+        # Saldo (controlo anual — mantém-se como está, inclui meses futuros)
+        lbl_saldo_desc = QLabel("<b>Saldo (ano completo):</b>")
         lbl_saldo_desc.setStyleSheet("font-size: 13px;")
         layout.addWidget(lbl_saldo_desc, 3, 0)
-        
+
         lbl_saldo = QLabel(format_currency(saldo))
         if saldo < -0.01:
-            lbl_saldo.setStyleSheet("font-size: 13px; font-weight: bold; color: #dc3545;")  # Vermelho
-            status_msg = "Em Dívida"
-            status_color = "#dc3545"
+            lbl_saldo.setStyleSheet("font-size: 13px; font-weight: bold; color: #6c757d;")
         elif saldo > 0.01:
-            lbl_saldo.setStyleSheet("font-size: 13px; font-weight: bold; color: #28a745;")  # Verde
-            status_msg = "Crédito"
-            status_color = "#28a745"
+            lbl_saldo.setStyleSheet("font-size: 13px; font-weight: bold; color: #28a745;")
         else:
-            lbl_saldo.setStyleSheet("font-size: 13px; font-weight: bold; color: #28a745;")  # Verde (Em Dia)
-            status_msg = "Em Dia"
-            status_color = "#28a745"
+            lbl_saldo.setStyleSheet("font-size: 13px; font-weight: bold; color: #28a745;")
         lbl_saldo.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(lbl_saldo, 3, 1)
-        
-        lbl_status = QLabel(f"<b>{status_msg}</b>")
-        lbl_status.setStyleSheet(f"font-size: 12px; color: {status_color};")
-        lbl_status.setAlignment(Qt.AlignmentFlag.AlignCenter)  # CENTRALIZAR
-        layout.addWidget(lbl_status, 3, 2, 1, 2)
-        
-        # Se estiver em dívida, criar animação de piscar
-        if saldo < -0.01:
+
+        # --- Estado à data de hoje (atraso REAL) + ícone WhatsApp ---
+        # Em vez de usar o saldo anual (que inclui meses futuros ainda não
+        # vencidos), comparamos o pago com o esperado até ao mês actual.
+        # NOTA: assume-se que o ano de quotas corre Jan-Dez, alinhado com o
+        # mês corrente do calendário. Ajustar aqui se o condomínio usar um
+        # ano de quotas com início diferente.
+        estado = calcular_estado_atraso(
+            self.dados['total_geral'], self.quota_normal, self.quota_extra
+        )
+        em_atraso = estado["em_atraso"]
+
+        # Linha horizontal: status + ícone WA (só se atraso)
+        status_row = QHBoxLayout()
+        status_row.setSpacing(6)
+        status_row.setContentsMargins(0, 0, 0, 0)
+
+        lbl_status = QLabel(f"<b>{estado['status_msg']}</b>")
+        lbl_status.setStyleSheet(f"font-size: 12px; color: {estado['status_color']};")
+        lbl_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        status_row.addWidget(lbl_status)
+
+        # Ícone WhatsApp — só no exercício corrente, com atraso e telefone
+        telefone_cond = self.telemovel
+        wa_permitido = pasta_e_corrente(self.pasta_dados)
+
+        if em_atraso and formatar_numero_wa(telefone_cond) and wa_permitido:
+            self.btn_wa = QPushButton()
+            wa_icon_path = ICONS_DIR / "whatsapp-icon.png"
+            if wa_icon_path.exists():
+                self.btn_wa.setIcon(QIcon(str(wa_icon_path)))
+            self.btn_wa.setIconSize(QSize(48, 48))
+            self.btn_wa.setFixedSize(48, 48)
+            self.btn_wa.setFlat(True)
+            self.btn_wa.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            tooltip_wa = (
+                f"Enviar mensagem por WhatsApp a {self.nome}\n"
+                f"({estado['meses_atraso']} quota(s) em atraso)"
+            )
+            if self.outros_na_fracao:
+                tooltip_wa += (
+                    f"\n⚠️ Fração partilhada com: {', '.join(self.outros_na_fracao)}"
+                    f" — valores agregados, confirme antes de enviar"
+                )
+            self.btn_wa.setToolTip(tooltip_wa)
+            self.btn_wa.setStyleSheet("""
+                QPushButton {
+                    background: transparent;
+                    border: none;
+                    padding: 0;
+                    margin: 0;
+                }
+                QPushButton:hover {
+                    background: transparent;
+                }
+                QPushButton:pressed {
+                    background: transparent;
+                }
+            """)
+            self.btn_wa.clicked.connect(
+                lambda: self._enviar_whatsapp_condomino(telefone_cond, estado)
+            )
+            status_row.addWidget(self.btn_wa)
+
+        status_row.addStretch()
+        # Coloca o row horizontal nas células (3,2) a (3,3) do grid
+        layout.addLayout(status_row, 3, 2, 1, 2)
+
+        # Aviso: ANDAR partilhado com outro(s) condómino(s) ativo(s) —
+        # os valores pagos/atraso são calculados por ANDAR, por isso ficam
+        # agregados e não podem ser atribuídos com confiança a um só.
+        if self.outros_na_fracao:
+            lbl_aviso = QLabel(
+                f"⚠️ Fração partilhada com: {', '.join(self.outros_na_fracao)} "
+                f"— valores agregados, confirme manualmente"
+            )
+            lbl_aviso.setStyleSheet(
+                "font-size: 10px; color: #b36b00; font-style: italic;"
+            )
+            lbl_aviso.setWordWrap(True)
+            lbl_aviso.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(lbl_aviso, 4, 0, 1, 4)
+
+        # Se estiver REALMENTE em atraso (até ao mês actual), piscar
+        if em_atraso:
             from PyQt6.QtCore import QPropertyAnimation, QSequentialAnimationGroup, QEasingCurve
             from PyQt6.QtWidgets import QGraphicsOpacityEffect
             
@@ -672,134 +833,41 @@ class PagamentosQuotasDialog(QDialog):
             self.blink_animation.start()
         
         return frame
-    
-    def carregar_administradores(self):
-        """Carrega lista de condóminos e seleciona o que tem ADMIN = .T."""
+
+    def _enviar_whatsapp_condomino(self, telefone: str, estado: dict):
+        """Abre o WhatsApp para este condómino com mensagem de atraso."""
+        if not pasta_e_corrente(self.pasta_dados):
+            QMessageBox.information(
+                self,
+                "Exercício histórico",
+                "O envio de mensagens WhatsApp só está disponível no exercício corrente.",
+            )
+            return
+        msg = montar_mensagem_atraso(
+            nome=self.nome,
+            meses_atraso=estado["meses_atraso"],
+            deficit=estado["deficit"],
+            fracao=self.fracao,
+            andar=self.andar,
+        )
+        if not abrir_whatsapp(telefone, msg):
+            QMessageBox.warning(
+                self, "Aviso",
+                "Não foi possível abrir o WhatsApp.\n\nVerifique o número de telefone."
+            )
+
+    def _obter_nome_administrador_atual(self) -> str:
+        """Devolve o nome do administrador em funções (admin == 1), ou ''."""
         if not self.pasta_dados:
-            self.combo_administrador.addItem("Administrador Padrão")
-            return
-
+            return ""
         try:
-            condominos_path = BASE_DIR / self.pasta_dados / "Condominos"
-
-            if not existe_dados(condominos_path):
-                self.combo_administrador.addItem("Administrador Padrão")
-                return
-
-            rows, _ = carregar_db(condominos_path)
-            nomes = []
-            admin_ativo = None
-
-            for row in rows:
-                nome = str(row.get('NOME', '')).strip()
-                if not nome:
-                    continue
-                nomes.append(nome)
-
-                # Normalização do boolean de ADMIN para formato legacy
-                flag_admin = row.get('ADMIN', False)
-                if isinstance(flag_admin, str):
-                    flag_admin = flag_admin.strip().upper() in ('T', '.T.', 'TRUE', '1')
-                elif isinstance(flag_admin, int):
-                    flag_admin = bool(flag_admin)
-                elif isinstance(flag_admin, float):
-                    flag_admin = bool(flag_admin)
-                if flag_admin:
-                    admin_ativo = nome
-
-            if nomes:
-                nomes.sort()
-                for nome in nomes:
-                    if nome == admin_ativo:
-                        self.combo_administrador.addItem(f"👑 {nome}")
-                    else:
-                        self.combo_administrador.addItem(nome)
-
-                if admin_ativo:
-                    for i in range(self.combo_administrador.count()):
-                        item_text = self.combo_administrador.itemText(i)
-                        nome_limpo = item_text.replace("👑 ", "")
-                        if nome_limpo == admin_ativo:
-                            self.combo_administrador.setCurrentIndex(i)
-                            break
-
-                self.combo_administrador.currentTextChanged.connect(self.ao_mudar_administrador)
-            else:
-                self.combo_administrador.addItem("Administrador Padrão")
-
+            for nome, is_admin in obter_lista_administradores(self.pasta_dados):
+                if is_admin:
+                    return nome
         except Exception as e:
-            print(f"Erro ao carregar administradores: {e}")
-            self.combo_administrador.addItem("Administrador Padrão")
-    
-    def ao_mudar_administrador(self, novo_admin):
-        """Atualiza campo ADMIN quando mudar a seleção"""
-        if not novo_admin or not self.pasta_dados:
-            return
+            print(f"Erro ao obter administrador: {e}")
+        return ""
 
-        novo_admin = novo_admin.replace("👑 ", "")
-
-        try:
-            condominos_path = BASE_DIR / self.pasta_dados / "Condominos"
-            if not existe_dados(condominos_path):
-                return
-
-            rows, _ = carregar_db(condominos_path)
-            df = pd.DataFrame(rows, dtype=object)
-            if df.empty:
-                return
-
-            # Primeiro: desativar ADMIN em todos os condóminos
-            for idx, row in df.iterrows():
-                df.at[idx, 'ADMIN'] = False
-
-            # Segundo: ativar ADMIN apenas no condómino selecionado
-            for idx, row in df.iterrows():
-                nome = str(row.get('NOME', '')).strip()
-                if nome == novo_admin:
-                    df.at[idx, 'ADMIN'] = True
-                    break
-
-            field_specs = 'NOME C(40); MORADA C(40); CPOSTAL C(8); CIDADE C(10); TELEMOVEL C(11); EMAIL C(40); FRACAO C(1); ANDAR C(10); PERMILAGEM N(5,3); QUOTAN N(10,2); QUOTAE N(10,2); FOTO C(30); CHECK L; ADMIN L'
-            if not salvar_db(df, str(condominos_path), field_specs):
-                raise RuntimeError('salvar_db falhou para Condominos')
-
-            self.atualizar_coroa_combobox(novo_admin)
-            if self.parent() and hasattr(self.parent(), 'carregar_tabela'):
-                self.parent().carregar_tabela()
-                print(f"✓ Grid atualizado em tempo real - Novo admin: {novo_admin}")
-
-        except Exception as e:
-            print(f"Erro ao atualizar administrador: {e}")
-    
-    def atualizar_coroa_combobox(self, novo_admin):
-        """Atualiza a combobox para mover a coroa para o novo administrador"""
-        # Desconectar temporariamente o evento para evitar loops
-        try:
-            self.combo_administrador.currentTextChanged.disconnect(self.ao_mudar_administrador)
-        except:
-            pass
-        
-        # Guardar índice atual
-        indice_atual = self.combo_administrador.currentIndex()
-        
-        # Atualizar todos os itens da combobox
-        for i in range(self.combo_administrador.count()):
-            texto_item = self.combo_administrador.itemText(i)
-            nome_limpo = texto_item.replace("👑 ", "")
-            
-            # Adicionar coroa apenas ao novo admin
-            if nome_limpo == novo_admin:
-                self.combo_administrador.setItemText(i, f"👑 {nome_limpo}")
-            else:
-                # Remover coroa dos outros
-                self.combo_administrador.setItemText(i, nome_limpo)
-        
-        # Manter seleção atual (mas agora com coroa atualizada)
-        self.combo_administrador.setCurrentIndex(indice_atual)
-        
-        # Reconectar evento
-        self.combo_administrador.currentTextChanged.connect(self.ao_mudar_administrador)
-    
     def atualizar_estado_botao_imprimir(self):
         """Ativa/desativa botão de impressão baseado no valor total pago"""
         total_pago = self.dados.get('total_geral', 0.0)
@@ -825,14 +893,16 @@ class PagamentosQuotasDialog(QDialog):
             )
             return
         
-        # Obter administrador selecionado
-        administrador = self.combo_administrador.currentText().replace("👑 ", "")
+        # Administrador em funções (definido na grelha de Condóminos)
+        administrador = (self.administrador_nome or "").strip()
         
-        if not administrador or administrador == "Administrador Padrão":
+        if not administrador:
             QMessageBox.warning(
                 self,
                 "Aviso",
-                "Por favor, selecione um administrador válido."
+                "Não há administrador em funções definido.\n\n"
+                "Na grelha de Condóminos, clique com o botão direito sobre o nome "
+                "do condómino para o definir como administrador."
             )
             return
         
@@ -860,12 +930,11 @@ class PagamentosQuotasDialog(QDialog):
         
         # Gerar recibo
         try:
-            # Nº de meses = total pago ÷ valor da quota mensal
-            # (corrige o caso em que o condómino paga vários meses de uma só vez)
             v_normal = self.dados.get('total_normal', 0.0)
             v_extra  = self.dados.get('total_extra', 0.0)
-            meses_n  = round(v_normal / self.quota_normal) if self.quota_normal > 0 else 0
-            meses_e  = round(v_extra  / self.quota_extra)  if self.quota_extra  > 0 else 0
+            meses_n, meses_e = calcular_meses_quotas(
+                v_normal, v_extra, self.quota_normal, self.quota_extra
+            )
 
             pdf_path = gerar_recibo_pdf(
                 fracao             = self.fracao,
@@ -912,6 +981,133 @@ class PagamentosQuotasDialog(QDialog):
 
 
 # ====================================================================
+# DIÁLOGO CC / NIF
+# ====================================================================
+class CCDialog(QDialog):
+    """Pequena janela para editar Cartão de Cidadão, validade e NIF."""
+
+    def __init__(self, parent=None, cc_numero="", cc_validade="", nif="", nome=""):
+        super().__init__(parent)
+        titulo = "Cartão de Cidadão"
+        if nome:
+            titulo = f"CC — {nome}"
+        self.setWindowTitle(titulo)
+        self.setModal(True)
+        self.setMinimumWidth(320)
+        self.setStyleSheet("""
+            QDialog { background: #f7f7f7; }
+            QLabel { font-size: 12px; }
+            QLineEdit {
+                padding: 4px 6px;
+                border: 1px solid #aaa;
+                border-radius: 3px;
+                background: white;
+                font-family: monospace;
+            }
+            QPushButton {
+                padding: 5px 14px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
+
+        form = QFormLayout()
+        form.setSpacing(8)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.ed_cc = QLineEdit(str(cc_numero or ""))
+        self.ed_cc.setPlaceholderText("xxxxxxxx x xxx")
+        self.ed_cc.setMaxLength(20)
+        form.addRow("Cartão Cidadão:", self.ed_cc)
+
+        self.ed_validade = QLineEdit(str(cc_validade or ""))
+        self.ed_validade.setPlaceholderText("dd-mm-yyyy")
+        self.ed_validade.setMaxLength(10)
+        form.addRow("Data Validade:", self.ed_validade)
+
+        self.ed_nif = QLineEdit(str(nif or ""))
+        self.ed_nif.setPlaceholderText("xxxxxxxxx")
+        self.ed_nif.setMaxLength(9)
+        form.addRow("NIF:", self.ed_nif)
+
+        layout.addLayout(form)
+
+        btns = QHBoxLayout()
+        btns.addStretch()
+        btn_salvar = QPushButton("OK")
+        btn_salvar.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                border: none;
+            }
+            QPushButton:hover { background-color: #218838; }
+        """)
+        btn_salvar.clicked.connect(self.accept)
+        btn_cancelar = QPushButton("Cancelar")
+        btn_cancelar.setStyleSheet("""
+            QPushButton {
+                background-color: #6c757d;
+                color: white;
+                border: none;
+            }
+            QPushButton:hover { background-color: #5a6268; }
+        """)
+        btn_cancelar.clicked.connect(self.reject)
+        btns.addWidget(btn_cancelar)
+        btns.addWidget(btn_salvar)
+        layout.addLayout(btns)
+
+    def valores(self):
+        return {
+            "CC_NUMERO": self.ed_cc.text().strip(),
+            "CC_VALIDADE": self.ed_validade.text().strip(),
+            "NIF": self.ed_nif.text().strip(),
+        }
+
+
+# ====================================================================
+# DELEGATE BOTÃO CC
+# ====================================================================
+class CCButtonDelegate(QStyledItemDelegate):
+    """Desenha um botãozinho verde com 'CC' na célula."""
+
+    def paint(self, painter, option, index):
+        from PyQt6.QtWidgets import QStyle
+
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(option.rect, option.palette.highlight())
+        else:
+            fundo = index.data(Qt.ItemDataRole.BackgroundRole)
+            painter.fillRect(option.rect, fundo if fundo else option.palette.base())
+
+        # Botão centrado
+        btn_w, btn_h = 36, 20
+        x = option.rect.x() + (option.rect.width() - btn_w) // 2
+        y = option.rect.y() + (option.rect.height() - btn_h) // 2
+        btn_rect = QRect(x, y, btn_w, btn_h)
+
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setBrush(QColor("#28a745"))
+        painter.setPen(QPen(QColor("#1e7e34"), 1))
+        painter.drawRoundedRect(btn_rect, 4, 4)
+
+        painter.setPen(QColor("#ffffff"))
+        font = painter.font()
+        font.setBold(True)
+        font.setPointSize(9)
+        painter.setFont(font)
+        painter.drawText(btn_rect, Qt.AlignmentFlag.AlignCenter, "CC")
+
+    def sizeHint(self, option, index):
+        return QSize(50, 28)
+
+
+# ====================================================================
 # MODELO DE TABELA
 # ====================================================================
 class CondominosTableModel(QAbstractTableModel):
@@ -920,10 +1116,22 @@ class CondominosTableModel(QAbstractTableModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._data = []
-        self._fields = ['NOME', 'TELEMOVEL', 'CHECK', 'EMAIL', 'FRACAO', 'ANDAR', 
-                        'PERMILAGEM', 'QUOTAN', 'QUOTAE', 'FOTO']
-        self._headers = ['Nome', 'Telemóvel', '✓', 'Email', 'Fração', 'Andar', 
-                         'Permilagem', 'Quota N', 'Quota E', 'Foto']
+        # Identidades das linhas alteradas desde a última gravação.
+        # Usar id(dict) mantém o destaque correto mesmo após ordenar a tabela.
+        self._dirty_row_ids = set()
+        # Colunas visíveis. CC é só UI (botão); dados em CC_NUMERO/CC_VALIDADE/NIF no dict.
+        self._fields = ['NOME', 'TELEMOVEL', 'CHECK', 'EMAIL', 'FRACAO', 'ANDAR',
+                        'PERMILAGEM', 'QUOTAN', 'QUOTAE', 'CC', 'FOTO']
+        self._headers = ['Nome', 'Telemóvel', '✓', 'Email', 'Fração', 'Andar',
+                         'Permilagem', 'Quota N', 'Quota E', 'CC', 'Foto']
+        # Cache da tabela `fracoes` — FRACAO é a chave canónica
+        self._fracoes_por_fracao = {}  # {fracao: {'ANDAR':..., 'PERMILAGEM':...}}
+        self._fracoes_por_andar = {}   # {andar:  {'FRACAO':..., 'PERMILAGEM':...}}
+
+    def set_fracoes(self, fracoes):
+        """Define a lista de frações (tabela `fracoes`) para a ComboBox da
+        FRACAO e para derivar automaticamente ANDAR/PERMILAGEM."""
+        self._fracoes_por_fracao, self._fracoes_por_andar, _dups = construir_mapas_fracoes(fracoes)
     
     def rowCount(self, parent=QModelIndex()):
         return len(self._data)
@@ -946,19 +1154,27 @@ class CondominosTableModel(QAbstractTableModel):
         row_dict = self._data[row]
         value = row_dict.get(key, '')
         
+        # Fundo amarelo claro para qualquer registo alterado ainda não gravado.
+        if role == Qt.ItemDataRole.BackgroundRole:
+            if id(row_dict) in self._dirty_row_ids:
+                return QBrush(QColor("#fff2b2"))
+            return QVariant()
+
         # DisplayRole (o que aparece na tela)
         if role == Qt.ItemDataRole.DisplayRole:
             if col == 2:  # CHECK
                 return ''  # Checkbox delegate cuida da visualização
+            elif col == 9:  # CC — delegate desenha o botão
+                return ''
             elif col in (7, 8):  # Quotas
                 try:
                     return f"{float(value):.2f}"
-                except:
+                except Exception:
                     return "0.00"
             elif col == 6:  # Permilagem
                 try:
                     return f"{float(value):.3f}"
-                except:
+                except Exception:
                     return "0.000"
             else:
                 return str(value)
@@ -971,7 +1187,7 @@ class CondominosTableModel(QAbstractTableModel):
         elif role == Qt.ItemDataRole.TextAlignmentRole:
             if col in (6, 7, 8):  # Permilagem e Quotas
                 return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-            elif col == 2:  # CHECK
+            elif col in (2, 4, 9):  # CHECK, FRAÇÃO, CC
                 return Qt.AlignmentFlag.AlignCenter
             else:
                 return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
@@ -987,11 +1203,13 @@ class CondominosTableModel(QAbstractTableModel):
         if not index.isValid():
             return Qt.ItemFlag.NoItemFlags
         
-        # Coluna FOTO (9) é somente leitura
-        if index.column() == 9:
-            return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-        
-        return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEditable
+        # ANDAR (col 5) e PERMILAGEM (col 6) são derivados da FRACAO (read-only).
+        # CC (col 9) abre diálogo próprio. FRACAO (col 4) é editável via ComboBox.
+        col = index.column()
+        base = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+        if col in (5, 6, 9):  # ANDAR, PERMILAGEM, CC
+            return base
+        return base | Qt.ItemFlag.ItemIsEditable
     
     def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
         if not index.isValid() or role != Qt.ItemDataRole.EditRole:
@@ -1002,61 +1220,52 @@ class CondominosTableModel(QAbstractTableModel):
             return False
         
         key = self._fields[index.column()]
+        # CC é só UI (abre diálogo próprio) — nunca se escreve diretamente.
+        if key == 'CC':
+            return False
         row_dict = self._data[row]
+
+        # Validação / normalização na lógica de negócio
+        # Lista (mesmo vazia) = restrição estrita às frações da tabela `fracoes`
+        fracoes_validas = list(self._fracoes_por_fracao.keys())
+        ok, value = validar_e_normalizar_campo(key, value, fracoes_validas)
+        if not ok:
+            return False
         
-        # Validações específicas
-        if key == 'TELEMOVEL':
-            value = str(value).strip()
-            if value and not value.isdigit():
-                return False
-            if len(value) > 11:
-                return False
-        
-        elif key == 'EMAIL':
-            value = str(value).strip()
-            if value and '@' not in value:
-                return False
-        
-        elif key == 'FRACAO':
-            value = str(value).strip().upper()
-            if value and value not in ('A', 'B', 'C', 'D', 'E', 'F'):
-                return False
-        
-        elif key == 'PERMILAGEM':
-            try:
-                if value:
-                    value = float(str(value).replace(',', '.'))
-                    if not 0 <= value <= 999.999:
-                        return False
-            except:
-                return False
-        
-        elif index.column() in (7, 8):  # Quotas
-            try:
-                if value:
-                    s = str(value).replace("€", "").replace(" ", "").strip()
-                    if "," in s and "." in s:
-                        # Ambos presentes: o último é o separador decimal
-                        # ex: "1.234,56" → remove os pontos, troca vírgula por ponto
-                        if s.rfind(",") > s.rfind("."):
-                            s = s.replace(".", "").replace(",", ".")
-                        else:
-                            s = s.replace(",", "")
-                    else:
-                        # Só vírgula  →  é o separador decimal  ("24,5" → "24.5")
-                        s = s.replace(",", ".")
-                    value = float(s)
-            except:
-                return False
-        
+        # Só marcar como alterado quando o valor realmente muda.
+        valor_anterior = row_dict.get(key, '')
+        if valor_anterior != value:
+            self._dirty_row_ids.add(id(row_dict))
         row_dict[key] = value
-        self.dataChanged.emit(index, index)
+        self.dataChanged.emit(index, index, [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole, Qt.ItemDataRole.BackgroundRole])
+        # Repintar a linha completa para que o amarelo seja imediatamente visível.
+        self.dataChanged.emit(
+            self.index(row, 0),
+            self.index(row, self.columnCount() - 1),
+            [Qt.ItemDataRole.BackgroundRole],
+        )
         
         # Se alterou CHECK, atualizar também EMAIL para mudar a cor
         if index.column() == 2:  # Coluna CHECK
             email_index = self.index(index.row(), 3)  # Coluna EMAIL
             self.dataChanged.emit(email_index, email_index)
-        
+
+        # FRACAO é a chave canónica → derivar ANDAR + PERMILAGEM + quotas
+        # (quotas: copia se fração/andar já existir; senão proporção pela permilagem).
+        # QUOTAN/QUOTAE continuam editáveis manualmente na grelha.
+        if key == 'FRACAO':
+            actualizadas = sincronizar_por_fracao(
+                row_dict, value, self._fracoes_por_fracao,
+                dados_condominos=self._data,
+            )
+            for campo_act in actualizadas:
+                try:
+                    col = self._fields.index(campo_act)
+                except ValueError:
+                    continue
+                idx = self.index(row, col)
+                self.dataChanged.emit(idx, idx)
+
         return True
     
     def setAdminData(self, row, value):
@@ -1076,6 +1285,7 @@ class CondominosTableModel(QAbstractTableModel):
         for i in range(rows):
             new_row = criar_novo_condomino()
             self._data.insert(position, new_row)
+            self._dirty_row_ids.add(id(new_row))
         self.endInsertRows()
         return True
     
@@ -1088,7 +1298,44 @@ class CondominosTableModel(QAbstractTableModel):
     def load_from_db(self, caminho):
         self.beginResetModel()
         self._data = carregar_condominos_db(caminho)
+        # Alinhar ANDAR/PERMILAGEM com a tabela `fracoes` (chave = FRACAO)
+        if self._fracoes_por_fracao:
+            n = reconciliar_com_fracoes(self._data, self._fracoes_por_fracao)
+            if n:
+                print(f"✓ Reconciliados {n} condómino(s) com a tabela fracoes")
+        self._dirty_row_ids.clear()
         self.endResetModel()
+
+    # Colunas pelas quais é permitido ordenar ao clicar no cabeçalho.
+    COLUNAS_ORDENAVEIS = (4, 6)  # FRACAO, PERMILAGEM
+
+    def sort(self, column, order=Qt.SortOrder.AscendingOrder):
+        """Ordena as linhas pela coluna indicada.
+
+        Suportado apenas para FRACAO (col. 4) e PERMILAGEM (col. 6) — as
+        únicas colunas cuja ordenação faz sentido na prática. Um pedido
+        de ordenação por qualquer outra coluna é ignorado (ver também
+        CondominosWidget._ao_clicar_cabecalho, que já filtra o clique
+        antes de chegar aqui).
+        """
+        if column not in self.COLUNAS_ORDENAVEIS:
+            return
+        key = self._fields[column]
+        descendente = (order == Qt.SortOrder.DescendingOrder)
+
+        def chave_ordenacao(row_dict):
+            valor = row_dict.get(key)
+            if key == 'PERMILAGEM':
+                try:
+                    return float(valor)
+                except (TypeError, ValueError):
+                    return 0.0
+            # FRACAO: ordenar como texto (A, B, C, ...)
+            return str(valor or '').strip().upper()
+
+        self.layoutAboutToBeChanged.emit()
+        self._data.sort(key=chave_ordenacao, reverse=descendente)
+        self.layoutChanged.emit()
     
     def save_to_db(self, caminho):
         return guardar_condominos_db(caminho, self._data)
@@ -1161,7 +1408,6 @@ class CondominosWidget(QWidget):
                 color: white;
                 border-radius: 6px;
                 padding: 6px 12px;
-                font-weight: bold;
             }
             QPushButton:hover {
                 background-color: #1b5e20;
@@ -1173,6 +1419,38 @@ class CondominosWidget(QWidget):
         """)
         btn_imprimir_recibos.clicked.connect(self.imprimir_recibos_lote)
         btn_bar.addWidget(btn_imprimir_recibos)
+        btn_bar.addSpacing(10)
+
+        self.btn_whatsapp = QPushButton(" Atrasados ")
+        self.btn_whatsapp.setFixedHeight(45)
+        self.btn_whatsapp.setToolTip(
+            "Abre o WhatsApp para todos os condóminos com quotas em atraso\n"
+            "(mensagem pré-preenchida — confirma o envio em cada janela)\n"
+            "Disponível apenas no exercício corrente."
+        )
+        wa_icon_path = ICONS_DIR / "whatsapp-icon.png"
+        if wa_icon_path.exists():
+            self.btn_whatsapp.setIcon(QIcon(str(wa_icon_path)))
+            self.btn_whatsapp.setIconSize(QSize(42, 42))
+        self.btn_whatsapp.setStyleSheet("""
+            QPushButton {
+                background-color: #337785;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 2px 12px 2px 4px;
+            }
+            QPushButton:hover {
+                background-color: #1D6978;
+            }
+            QPushButton:disabled {
+                background-color: #ccc;
+                color: #666;
+            }
+        """)
+        self.btn_whatsapp.clicked.connect(self.enviar_whatsapp_atrasados)
+        btn_bar.addWidget(self.btn_whatsapp)
+        self._atualizar_estado_whatsapp()
 
         btn_bar.addStretch()
         layout.addLayout(btn_bar)
@@ -1184,6 +1462,15 @@ class CondominosWidget(QWidget):
         
         header = self.table_view.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+
+        # Ordenação ao clicar no cabeçalho — apenas Fração e Permilagem
+        # (as outras colunas ignoram o clique; ver _ao_clicar_cabecalho).
+        header.setSortIndicatorShown(True)
+        header.setSectionsClickable(True)
+        self._coluna_ordenada = 4  # FRACAO (ordem já aplicada por defeito ao carregar)
+        self._ordem_ordenacao = Qt.SortOrder.AscendingOrder
+        header.setSortIndicator(self._coluna_ordenada, self._ordem_ordenacao)
+        header.sectionClicked.connect(self._ao_clicar_cabecalho)
         self.table_view.setColumnWidth(0, 220)  # Nome
         self.table_view.setColumnWidth(1, 100)  # Telemóvel
         self.table_view.setColumnWidth(2, 30)   # CHECK
@@ -1193,25 +1480,40 @@ class CondominosWidget(QWidget):
         self.table_view.setColumnWidth(6, 100)  # Permilagem
         self.table_view.setColumnWidth(7, 100)  # Quota N
         self.table_view.setColumnWidth(8, 100)  # Quota E
-        header.setSectionResizeMode(9, QHeaderView.ResizeMode.Stretch)  # Foto
+        self.table_view.setColumnWidth(9, 50)   # CC
+        header.setSectionResizeMode(10, QHeaderView.ResizeMode.Stretch)  # Foto
         
         self.table_view.setAlternatingRowColors(True)
         self.table_view.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
-        self.table_view.setStyleSheet("""
-            QTableView { 
+        # Setas de ordenação a amarelo (#FFD700) — imagens antialiased (Qt não permite
+        # recolorir a seta nativa; a única forma estável é substituir por image:)
+        _up = (ICONS_DIR / "sort_up_yellow.png").as_posix()
+        _down = (ICONS_DIR / "sort_down_yellow.png").as_posix()
+        self.table_view.setStyleSheet(f"""
+            QTableView {{ 
                 gridline-color: #C0C0C0; 
                 border: 1px solid #C0C0C0; 
-            }
-            QTableView::item { 
+            }}
+            QTableView::item {{ 
                 padding: 5px; 
-            }
-            QHeaderView::section {
+            }}
+            QHeaderView::section {{
                 background-color: #2F5597; 
                 color: white;
                 font-weight: bold; 
                 padding: 8px; 
                 border: 1px solid #1F4587;
-            }
+            }}
+            QHeaderView::up-arrow {{
+                image: url({_up});
+                width: 11px;
+                height: 11px;
+            }}
+            QHeaderView::down-arrow {{
+                image: url({_down});
+                width: 11px;
+                height: 11px;
+            }}
         """)
         self.table_view.setEditTriggers(
             QTableView.EditTrigger.DoubleClicked | QTableView.EditTrigger.SelectedClicked
@@ -1227,13 +1529,13 @@ class CondominosWidget(QWidget):
         email_delegate = EmailColorDelegate(self.table_view)
         self.table_view.setItemDelegateForColumn(3, email_delegate)
         
-        andar_delegate = AndarComboDelegate(self.table_view)
-        self.table_view.setItemDelegateForColumn(5, andar_delegate)
-        
-        # Menu de contexto
-        self.table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.table_view.customContextMenuRequested.connect(self.show_context_menu)
-        
+        # FRACAO (col 4): ComboBox — chave canónica; ANDAR/PERMILAGEM derivados
+        self.fracao_delegate = FracaoComboDelegate(self.table_view)
+        self.table_view.setItemDelegateForColumn(4, self.fracao_delegate)
+
+        cc_delegate = CCButtonDelegate(self.table_view)
+        self.table_view.setItemDelegateForColumn(9, cc_delegate)
+
         # Mouse tracking
         self.table_view.setMouseTracking(True)
         self.table_view.viewport().setMouseTracking(True)
@@ -1282,6 +1584,32 @@ class CondominosWidget(QWidget):
         # Conectar seleção
         self.table_view.selectionModel().selectionChanged.connect(self.update_status_bar)
     
+    def _ao_clicar_cabecalho(self, coluna):
+        """Ordena a tabela ao clicar no cabeçalho de uma coluna.
+
+        Apenas FRACAO (col. 4) e PERMILAGEM (col. 6) são ordenáveis; o
+        clique em qualquer outra coluna é ignorado (sem indicador, sem
+        reordenação), já que ordenar por NOME, EMAIL, etc. não tem
+        utilidade prática aqui.
+        """
+        if coluna not in CondominosTableModel.COLUNAS_ORDENAVEIS:
+            return
+
+        if coluna == self._coluna_ordenada:
+            self._ordem_ordenacao = (
+                Qt.SortOrder.DescendingOrder
+                if self._ordem_ordenacao == Qt.SortOrder.AscendingOrder
+                else Qt.SortOrder.AscendingOrder
+            )
+        else:
+            self._coluna_ordenada = coluna
+            self._ordem_ordenacao = Qt.SortOrder.AscendingOrder
+
+        self.model.sort(self._coluna_ordenada, self._ordem_ordenacao)
+        self.table_view.horizontalHeader().setSortIndicator(
+            self._coluna_ordenada, self._ordem_ordenacao
+        )
+
     def update_status_bar(self, selected, deselected):
         indexes = self.table_view.selectionModel().selectedRows()
         if indexes:
@@ -1293,9 +1621,44 @@ class CondominosWidget(QWidget):
         self.status_bar.showMessage("")
     
     def set_pasta_dados(self, pasta_dados):
+        from Commons import pasta_de_dados
         self.pasta_dados = pasta_dados
-        self.caminho_condominos_db = BASE_DIR / pasta_dados / "Condominos"
+        self.pasta = pasta_de_dados(pasta_dados)
+        self.caminho_condominos_db = self.pasta  # alias pasta real
+        self.carregar_fracoes()
         self.carregar_tabela()
+        self._atualizar_estado_whatsapp()
+
+    def _atualizar_estado_whatsapp(self):
+        """Ativa o botão WhatsApp só no exercício corrente; desativa em histórico."""
+        btn = getattr(self, "btn_whatsapp", None)
+        if btn is None:
+            return
+        corrente = pasta_e_corrente(self.pasta_dados)
+        btn.setEnabled(corrente)
+        if corrente:
+            btn.setToolTip(
+                "Envia uma menssagem pelo WhatsApp para \n"
+                "todos os condóminos com quotas em atraso."
+            )
+        else:
+            btn.setToolTip(
+                "WhatsApp indisponível em exercícios históricos.\n"
+                "Só pode enviar mensagens no ano corrente."
+            )
+
+    def carregar_fracoes(self):
+        """Lê a tabela `fracoes` e alimenta a ComboBox da FRACAO.
+
+        ANDAR e PERMILAGEM passam a ser derivados automaticamente da fração
+        escolhida (sem fallbacks inventados).
+        """
+        fracoes = obter_fracoes(self.pasta_dados)
+        self.model.set_fracoes(fracoes)
+        letras = [f['FRACAO'] for f in fracoes if f.get('FRACAO')]
+        self.fracao_delegate.set_items(letras)
+        if not letras:
+            print("⚠️ Tabela fracoes vazia — ComboBox da FRACAO sem itens")
     
     def carregar_tabela(self):
         if self.caminho_condominos_db:
@@ -1303,6 +1666,36 @@ class CondominosWidget(QWidget):
             self.status_bar.showMessage(f"✅ {self.model.rowCount()} Condóminos carregados")
     
     def adicionar_registo(self):
+        """Adiciona um condómino novo, se ainda existir fração livre.
+
+        Bloqueia quando todas as frações da tabela ``fracoes`` já estão
+        atribuídas a pelo menos um registo em ``condominos``.
+        """
+        fracoes_cfg = {
+            str(f.get("FRACAO") or "").strip().upper()
+            for f in (obter_fracoes(self.pasta_dados) or [])
+            if str(f.get("FRACAO") or "").strip()
+        }
+        fracoes_usadas = {
+            str(row.get("FRACAO") or "").strip().upper()
+            for row in (self.model._data or [])
+            if str(row.get("FRACAO") or "").strip()
+        }
+
+        if fracoes_cfg and fracoes_cfg.issubset(fracoes_usadas):
+            lista = ", ".join(sorted(fracoes_cfg))
+            QMessageBox.warning(
+                self,
+                "Frações esgotadas",
+                "<br><p style='color: red; font-weight: bold; font-size: 13pt;'>"
+                "Não é possível adicionar um novo condómino:</p><br>"
+                "Todas as frações ["f"{lista}] definidas na tabela de frações já estão "
+                "atribuídas a condóminos.<br><br>"
+                "Liberta uma fração (apagar/alterar o condómino correspondente) "
+                "ou acrescenta frações em Configurações antes de continuar.",
+            )
+            return
+
         row = self.model.rowCount()
         self.model.insertRows(row, 1)
         self.table_view.scrollToBottom()
@@ -1310,14 +1703,87 @@ class CondominosWidget(QWidget):
         self.table_view.setCurrentIndex(index)
         self.table_view.edit(index)
     
+    def selecionar_fotos(self, row, selecionar_pasta=False):
+        """Seleciona uma ou mais fotos para o condómino e copia-as para FOTOS_DIR.
+
+        Clique esquerdo na célula Foto: abre o seletor de ficheiros.
+        Clique direito: permite escolher uma pasta e importar as imagens que contém.
+        O campo FOTO guarda os nomes separados por ponto e vírgula; a pré-visualização
+        apresenta a primeira imagem da lista.
+        """
+        extensoes = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.tif', '.tiff'}
+        try:
+            if selecionar_pasta:
+                pasta = QFileDialog.getExistingDirectory(
+                    self,
+                    "Selecionar pasta com fotografias",
+                    str(FOTOS_DIR if FOTOS_DIR.exists() else BASE_DIR)
+                )
+                if not pasta:
+                    return
+                pasta_origem = Path(pasta)
+                ficheiros = sorted(
+                    f for f in pasta_origem.iterdir()
+                    if f.is_file() and f.suffix.lower() in extensoes
+                )
+                if not ficheiros:
+                    QMessageBox.information(
+                        self, "Sem fotografias",
+                        "A pasta selecionada não contém ficheiros de imagem suportados."
+                    )
+                    return
+            else:
+                caminhos, _ = QFileDialog.getOpenFileNames(
+                    self,
+                    "Selecionar fotografia(s) do condómino",
+                    str(FOTOS_DIR if FOTOS_DIR.exists() else BASE_DIR),
+                    "Imagens (*.jpg *.jpeg *.png *.bmp *.gif *.webp *.tif *.tiff);;Todos os ficheiros (*)"
+                )
+                if not caminhos:
+                    return
+                ficheiros = [Path(caminho) for caminho in caminhos]
+                ficheiros = [f for f in ficheiros if f.suffix.lower() in extensoes]
+                if not ficheiros:
+                    QMessageBox.warning(self, "Ficheiros inválidos", "Selecione ficheiros de imagem suportados.")
+                    return
+
+            FOTOS_DIR.mkdir(parents=True, exist_ok=True)
+            nomes_guardados = []
+            for origem in ficheiros:
+                destino = FOTOS_DIR / origem.name
+                # Evitar copiar um ficheiro sobre si próprio.
+                if origem.resolve() != destino.resolve():
+                    # Se já existir um ficheiro com o mesmo nome mas conteúdo diferente,
+                    # criar um nome alternativo para não o substituir silenciosamente.
+                    if destino.exists() and origem.stat().st_size != destino.stat().st_size:
+                        base, ext = origem.stem, origem.suffix
+                        contador = 1
+                        while destino.exists():
+                            destino = FOTOS_DIR / f"{base}_{contador}{ext}"
+                            contador += 1
+                    shutil.copy2(origem, destino)
+                nomes_guardados.append(destino.name)
+
+            valor = '; '.join(dict.fromkeys(nomes_guardados))
+            model_index = self.model.index(row, 9)
+            if not self.model.setData(model_index, valor, Qt.ItemDataRole.EditRole):
+                QMessageBox.warning(self, "Aviso", "Não foi possível atualizar o campo Foto.")
+                return
+            self.table_view.setCurrentIndex(model_index)
+            self.status_bar.showMessage(
+                f"{len(nomes_guardados)} fotografia(s) associada(s) ao condómino.", 5000
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Erro ao selecionar fotografias", str(e))
+
     def apagar_registo(self):
         indexes = self.table_view.selectionModel().selectedRows()
         if not indexes:
-            QMessageBox.warning(self, "Aviso", "Selecione uma linha para apagar.")
+            QMessageBox.warning(self, "Aviso", "<br><b>Selecione uma linha para apagar.</br>")
             return
         row = indexes[0].row()
         reply = QMessageBox.question(
-            self, "Confirmar", "Tem certeza que deseja apagar este condómino?",
+            self, "Confirmar", "<br><b>Tem certeza que deseja apagar este condómino?</b>",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if reply == QMessageBox.StandardButton.Yes:
@@ -1329,15 +1795,19 @@ class CondominosWidget(QWidget):
             QMessageBox.warning(self, "Aviso", "Nenhum ficheiro carregado.")
             return
         try:
-            # Validação
+            # Validação (inclui frações duplicadas — UNIQUE na BD)
             validar_condominos(self.model._data)
             
             # Guardar
             if not self.model.save_to_db(str(self.caminho_condominos_db)):
-                raise Exception("Erro ao guardar alterações.")
+                raise RuntimeError(
+                    "Não foi possível gravar na base de dados.\n\n"
+                    "Verifique se não há frações duplicadas e se a pasta de dados "
+                    "está acessível."
+                )
             
             # Sincronizar quotas normal/extra na tabela regras (sem INSERT)
-            atualizar_quotas_configs(self.pasta_dados, self.model._data)
+            atualizar_quotas_regras(self.pasta_dados, self.model._data)
 
             # Refresh visual da aba Regras (se existir no Main)
             self.quotas_atualizadas.emit()
@@ -1345,13 +1815,14 @@ class CondominosWidget(QWidget):
 
             QMessageBox.information(
                 self, "Sucesso",
-                "Alterações guardadas.\n"
-                "Quotas (normal/extra) sincronizadas na tabela regras."
+                "<b>Alterações guardadas</b><br><br>"
+                "Quotas (Normal/Extra) sincronizadas na tabela <b>regras</b>."
             )
+
             self.carregar_tabela()
             self.status_bar.showMessage("✅ Guardado — quotas sincronizadas em regras.")
         except ValueError as ve:
-            QMessageBox.warning(self, "Validação Falhou", str(ve))
+            QMessageBox.warning(self, "Validação falhou", str(ve))
         except Exception as e:
             QMessageBox.critical(self, "Erro", str(e))
     
@@ -1443,7 +1914,79 @@ class CondominosWidget(QWidget):
                 "Erro",
                 f"Erro ao gerar recibos em lote:\n\n{str(e)}"
             )
-    
+
+    def enviar_whatsapp_atrasados(self):
+        """Abre o WhatsApp para todos os condóminos com quotas em atraso."""
+        if not self.pasta_dados:
+            QMessageBox.warning(self, "Aviso", "Nenhuma pasta de dados carregada.")
+            return
+        if not pasta_e_corrente(self.pasta_dados):
+            QMessageBox.information(
+                self,
+                "Exercício histórico",
+                "O envio de mensagens WhatsApp só está disponível no exercício corrente.\n\n"
+                "Está a visualizar um ano do histórico — a operação foi bloqueada.",
+            )
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "WhatsApp — Quotas em Atraso",
+            "Pretende abrir o WhatsApp para TODOS os condóminos com quotas em atraso?\n\n"
+            "• Será aberta uma janela do WhatsApp por condómino\n"
+            "• A mensagem já vai preenchida — confirme o envio em cada janela\n"
+            "• Condóminos sem telefone ou inativos são ignorados",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self.status_bar.showMessage("⏳ A processar condóminos com atraso...")
+        QApplication.processEvents()
+
+        try:
+            resultado = enviar_whatsapp_a_todos_atrasados(self.pasta_dados, parent=self)
+        except Exception as e:
+            self.status_bar.showMessage("")
+            QMessageBox.critical(self, "Erro", f"Erro ao enviar WhatsApp:\n\n{e}")
+            return
+
+        enviados = resultado.get("enviados", 0)
+        total = resultado.get("total", 0)
+        ignorados = resultado.get("ignorados", [])
+        erros = resultado.get("erros", [])
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("WhatsApp — Resumo")
+        msg.setIcon(
+            QMessageBox.Icon.Information if enviados else QMessageBox.Icon.Warning
+        )
+        msg.setText(
+            f"Processados: {total} condómino(s)\n"
+            f"WhatsApp abertos: {enviados}\n"
+            f"Ignorados: {len(ignorados)}\n"
+            f"Erros: {len(erros)}"
+        )
+
+        detalhes = []
+        if ignorados:
+            detalhes.append("--- Ignorados ---")
+            detalhes.extend(f"  • {i}" for i in ignorados[:30])
+            if len(ignorados) > 30:
+                detalhes.append(f"  ... e mais {len(ignorados) - 30}")
+        if erros:
+            detalhes.append("\n--- Erros ---")
+            detalhes.extend(f"  ✗ {e}" for e in erros)
+        if detalhes:
+            msg.setDetailedText("\n".join(detalhes))
+
+        msg.exec()
+        self.status_bar.showMessage(
+            f"✅ {enviados} mensagem(s) de WhatsApp aberta(s)" if enviados
+            else "Nenhum condómino com atraso ou sem telefone"
+        )
+
     def keyPressEvent(self, event):
         """Lida com teclas Insert, Delete e Enter"""
         if event.key() == Qt.Key.Key_Insert:
@@ -1467,21 +2010,42 @@ class CondominosWidget(QWidget):
                     row = index.row()
                     col = index.column()
                     
-                    # Coluna 0 (NOME) - Mostrar foto
+                    # Coluna 0 (NOME) - foto + dica para alterar administrador
                     if col == 0:
-                        foto_nome = self.model._data[row].get('FOTO', '')
+                        pos = event.globalPosition().toPoint()
+                        tooltip_text = "Clique botão Dto. para alterar<br>o administrador em funções"
+                        foto_valor = str(self.model._data[row].get('FOTO', '') or '').strip()
+                        foto_nome = foto_valor.split(';')[0].strip() if foto_valor else ''
+                        foto_ok = False
                         if foto_nome:
-                            foto_path = FOTOS_DIR / foto_nome
-                            if foto_path.exists():
-                                self.mostrar_foto(str(foto_path), event.globalPosition().toPoint())
-                                self.tooltip_label.hide()
+                            foto_path = Path(foto_nome)
+                            if not foto_path.is_absolute():
+                                foto_path = FOTOS_DIR / foto_nome
+                            if foto_path.exists() and foto_path.is_file():
+                                foto_ok = self.mostrar_foto(str(foto_path), pos)
                             else:
                                 self.foto_label.hide()
-                                self.tooltip_label.hide()
                         else:
                             self.foto_label.hide()
-                            self.tooltip_label.hide()
-                    
+                        # Mensagem por baixo da foto (ou junto ao cursor se não houver foto)
+                        self.mostrar_tooltip(
+                            tooltip_text, pos,
+                            below_widget=self.foto_label if foto_ok else None,
+                        )
+
+                    # Coluna 2 (ICON ATIVAR) - Tooltip baseado em CHECK
+                    elif col == 2:
+                        self.foto_label.hide()
+                        check_value = self.model._data[row].get('CHECK', '.F.')
+                        is_checked = check_value in (True, 'T', '.T.', 't')
+                        
+                        if is_checked:
+                            tooltip_text = "✅ Desativar email"
+                        else:
+                            tooltip_text = "❌ Ativar email"
+                        
+                        self.mostrar_tooltip(tooltip_text, event.globalPosition().toPoint())
+                        
                     # Coluna 3 (EMAIL) - Tooltip baseado em CHECK
                     elif col == 3:
                         self.foto_label.hide()
@@ -1495,15 +2059,29 @@ class CondominosWidget(QWidget):
                         
                         self.mostrar_tooltip(tooltip_text, event.globalPosition().toPoint())
                     
-                    # Coluna 5 (ANDAR) - Tooltip para pagamentos
+                    # Coluna 4 (FRACAO) - edição via ComboBox
+                    elif col == 4:
+                        self.foto_label.hide()
+                        self.mostrar_tooltip(
+                            "Clique para escolher a fração",
+                            event.globalPosition().toPoint(),
+                        )
+
+                    # Coluna 5 (ANDAR) - clique = consultar pagamentos de quotas
                     elif col == 5:
                         self.foto_label.hide()
                         andar = str(self.model._data[row].get('ANDAR', '')).strip()
                         if andar:
-                            tooltip_text = "💰 Clique com o botão direito para\n    ver pagamentos de quotas deste\n    condómino"
+                            tooltip_text = "💰 Clique para ver\npagamentos de quotas"
                         else:
-                            tooltip_text = "Defina o ANDAR para ver\npagamentos de quotas"
+                            tooltip_text = "Defina a FRAÇÃO para ver\npagamentos de quotas"
                         self.mostrar_tooltip(tooltip_text, event.globalPosition().toPoint())
+
+                    # Coluna 9 (CC) - Tooltip
+                    elif col == 9:
+                        self.foto_label.hide()
+                        self.mostrar_tooltip("Clique para editar<br>C. Cidadão & NIF",
+                                             event.globalPosition().toPoint())
                     
                     # Outras colunas
                     else:
@@ -1516,74 +2094,179 @@ class CondominosWidget(QWidget):
             elif event.type() == QEvent.Type.Leave:
                 self.foto_label.hide()
                 self.tooltip_label.hide()
-                
+
+            elif event.type() == QEvent.Type.MouseButtonPress:
+                index = self.table_view.indexAt(event.pos())
+                if index.isValid():
+                    # Coluna NOME (col 0): botão direito → administrador em funções
+                    if (event.button() == Qt.MouseButton.RightButton and
+                            index.column() == 0):
+                        self.definir_administrador_por_linha(index.row())
+                        return True
+
+                    # Campo FOTO (col 10): botão esquerdo abre seleção de ficheiros
+                    if index.column() == 10:
+                        if event.button() == Qt.MouseButton.LeftButton:
+                            self.selecionar_fotos(index.row(), selecionar_pasta=False)
+                            return True
+
+                    # Coluna CC (col 9): abrir diálogo de Cartão de Cidadão / NIF
+                    if (event.button() == Qt.MouseButton.LeftButton and
+                            index.column() == 9):
+                        self.editar_cc(index.row())
+                        return True
+
+                    # Botão esquerdo na coluna ANDAR: consultar pagamentos.
+                    # (FRACAO é editável via ComboBox; o clique de quotas passou para ANDAR)
+                    if (event.button() == Qt.MouseButton.LeftButton and
+                            index.column() == 5):
+                        row = index.row()
+                        andar = str(self.model._data[row].get('ANDAR', '')).strip()
+                        if andar:
+                            self.mostrar_pagamentos_quotas(row)
+                        else:
+                            QMessageBox.warning(
+                                self, "Aviso",
+                                "Defina a FRAÇÃO do condómino antes de consultar pagamentos."
+                            )
+                        return True
+
         return super().eventFilter(obj, event)
+
+    def definir_administrador_por_linha(self, row):
+        """Define o condómino da linha como administrador em funções (admin=1)."""
+        if row < 0 or row >= len(self.model._data):
+            return
+        if not self.pasta_dados:
+            QMessageBox.warning(self, "Aviso", "Nenhuma pasta de dados carregada.")
+            return
+
+        cond = self.model._data[row]
+        nome = str(cond.get('NOME', '')).strip()
+        if not nome:
+            QMessageBox.warning(self, "Aviso", "O condómino não tem nome definido.")
+            return
+        if nome.startswith('[') and nome.endswith(']'):
+            QMessageBox.warning(
+                self, "Aviso",
+                "Não é possível definir um condómino inactivo como administrador."
+            )
+            return
+
+        if eh_admin_atual(cond.get('ADMIN', 0)):
+            QMessageBox.information(
+                self, "Administrador",
+                f"<b>{nome}</b> já é o administrador em funções."
+            )
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Administrador em funções",
+            f"Definir <b>{nome}</b> como administrador em funções?\n\n"
+            "O administrador actual passará a cessante.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            if not definir_administrador(self.pasta_dados, nome):
+                raise RuntimeError("definir_administrador falhou")
+            self.carregar_tabela()
+            self.status_bar.showMessage(
+                f"✅ {nome} é agora o administrador em funções.", 5000
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Erro",
+                f"Não foi possível alterar o administrador:\n\n{e}"
+            )
+
+    def editar_cc(self, row):
+        """Abre o diálogo de edição do Cartão de Cidadão / NIF para a linha."""
+        if row < 0 or row >= len(self.model._data):
+            return
+        cond = self.model._data[row]
+        dlg = CCDialog(
+            parent=self,
+            cc_numero=cond.get("CC_NUMERO", ""),
+            cc_validade=cond.get("CC_VALIDADE", ""),
+            nif=cond.get("NIF", ""),
+            nome=str(cond.get("NOME", "") or "").strip(),
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            vals = dlg.valores()
+            # Capturar valores ANTES de atualizar, para detetar mudanças reais
+            valores_anteriores = (
+                cond.get("CC_NUMERO", ""),
+                cond.get("CC_VALIDADE", ""),
+                cond.get("NIF", ""),
+            )
+            novos_valores = (
+                vals["CC_NUMERO"],
+                vals["CC_VALIDADE"],
+                vals["NIF"],
+            )
+            # Agora sim, atualizar o dicionário
+            cond["CC_NUMERO"] = vals["CC_NUMERO"]
+            cond["CC_VALIDADE"] = vals["CC_VALIDADE"]
+            cond["NIF"] = vals["NIF"]
+            # Só marcar como alterado se algo realmente mudou
+            if novos_valores != valores_anteriores:
+                self.model._dirty_row_ids.add(id(cond))
+            # Refrescar a célula CC e o fundo da linha.
+            idx = self.model.index(row, 9)
+            inicio = self.model.index(row, 0)
+            fim = self.model.index(row, self.model.columnCount() - 1)
+            self.model.dataChanged.emit(inicio, fim, [Qt.ItemDataRole.BackgroundRole])
+            self.model.dataChanged.emit(idx, idx)
+            self.status_bar.showMessage(
+                f"CC/NIF actualizados para {cond.get('NOME', '')} — grave as alterações.",
+                5000,
+            )
     
-    def mostrar_foto(self, foto_path, global_pos):
+    def mostrar_foto(self, foto_path, global_pos) -> bool:
+        """Mostra a foto junto ao cursor. Devolve True se ficou visível."""
         try:
             pixmap = QPixmap(foto_path)
             if not pixmap.isNull():
-                scaled = pixmap.scaled(150, 200, Qt.AspectRatioMode.KeepAspectRatio, 
-                                     Qt.TransformationMode.SmoothTransformation)
+                scaled = pixmap.scaled(
+                    150, 200,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
                 self.foto_label.setPixmap(scaled)
                 self.foto_label.adjustSize()
                 self.foto_label.move(global_pos.x() + 20, global_pos.y() - 125)
                 self.foto_label.show()
                 self.foto_label.raise_()
-        except:
-            self.foto_label.hide()
+                return True
+        except Exception:
+            pass
+        self.foto_label.hide()
+        return False
     
-    def mostrar_tooltip(self, text, global_pos):
-        """Mostra tooltip instantâneo"""
+    def mostrar_tooltip(self, text, global_pos, below_widget=None):
+        """Mostra tooltip instantâneo.
+
+        Se `below_widget` estiver visível, posiciona a mensagem imediatamente
+        por baixo desse widget (ex.: por baixo da foto do condómino).
+        """
         try:
             self.tooltip_label.setText(text)
             self.tooltip_label.adjustSize()
-            self.tooltip_label.move(global_pos.x() + 15, global_pos.y() + 10)
+            if below_widget is not None and below_widget.isVisible():
+                x = below_widget.x()
+                y = below_widget.y() + below_widget.height() + 6
+                self.tooltip_label.move(x, y)
+            else:
+                self.tooltip_label.move(global_pos.x() + 15, global_pos.y() + 10)
             self.tooltip_label.show()
             self.tooltip_label.raise_()
-        except:
+        except Exception:
             self.tooltip_label.hide()
-    
-    def show_context_menu(self, position):
-        """Exibe menu ao clicar com botão direito"""
-        index = self.table_view.indexAt(position)
-        
-        if not index.isValid():
-            return
-        
-        # Verificar se clicou na coluna ANDAR (coluna 5)
-        if index.column() != 5:
-            return
-        
-        # Verificar se o ANDAR está preenchido
-        row = index.row()
-        andar = str(self.model._data[row].get('ANDAR', '')).strip()
-        
-        if not andar:
-            return
-        
-        menu = QMenu()
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: white;
-                border: 1px solid #ccc;
-            }
-            QMenu::item {
-                padding: 8px 25px;
-            }
-            QMenu::item:selected {
-                background-color: #1976d2;
-                color: white;
-            }
-        """)
-        
-        action_ver_quotas = menu.addAction("💰 Ver Pagamentos de Quotas")
-        action_ver_quotas.setToolTip("Visualizar histórico de pagamentos deste condómino")
-        
-        action = menu.exec(self.table_view.viewport().mapToGlobal(position))
-        
-        if action == action_ver_quotas:
-            self.mostrar_pagamentos_quotas(row)
     
     def mostrar_pagamentos_quotas(self, row):
         """Obtém dados do condómino e exibe dialog de pagamentos"""
@@ -1593,6 +2276,7 @@ class CondominosWidget(QWidget):
         nome = str(condomino.get('NOME', '')).strip()
         andar = str(condomino.get('ANDAR', '')).strip()
         fracao = str(condomino.get('FRACAO', '')).strip()
+        telemovel = str(condomino.get('TELEMOVEL', '')).strip()
         quota_normal = clean_numeric(condomino.get('QUOTAN', 0))
         quota_extra = clean_numeric(condomino.get('QUOTAE', 0))
         
@@ -1600,6 +2284,13 @@ class CondominosWidget(QWidget):
         if not andar:
             QMessageBox.warning(self, "Aviso", "Condómino sem ANDAR definido")
             return
+
+        # Controlo: deteta se este ANDAR está (ainda) partilhado por mais de
+        # um condómino ativo (ex. transição de venda a meio do ano); reutiliza
+        # a lista já carregada em memória, sem nova leitura à BD
+        outros_na_fracao = condominos_ativos_na_fracao(
+            self.model._data, andar, excluir_nome=nome
+        )
         
         # Mostrar mensagem de processamento
         self.status_bar.showMessage("⏳ Processando pagamentos...")
@@ -1618,6 +2309,8 @@ class CondominosWidget(QWidget):
                 quota_extra=quota_extra,
                 dados_pagamentos=dados,
                 pasta_dados=self.pasta_dados,
+                telemovel=telemovel,
+                outros_na_fracao=outros_na_fracao,
                 parent=self
             )
             
@@ -1633,7 +2326,9 @@ class CondominosWidget(QWidget):
             QMessageBox.critical(
                 self, 
                 "Erro", 
-                f"Erro ao processar pagamentos:\n\n{str(e)}\n\nVerifique se os ficheiros Bancos, Caixa e Configs existem."
+                f"Erro ao processar pagamentos:\n\n{str(e)}\n\n"
+                f"Verifique se os ficheiros Bancos e Caixa existem e se "
+                f"as quotas estão configuradas na aba Regras."
             )
 
 

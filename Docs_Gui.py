@@ -1,31 +1,45 @@
 """
-Docs_Gui.py - Visualizar de PDF integrado com envio por Gmail
-Com zoom suave, slider horizontal e envio de emails via SMTP do Gmail
+Docs_Gui.py - Documentos do condomínio
+- Visualização de PDF com zoom e envio por Gmail
+- Geração automática da Ata de Assembleia de Condóminos
 """
 import os
 import sys
 import smtplib
+from datetime import date, time
 
 from pathlib import Path
 from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from PyQt6.QtCore import Qt, QSize, QTimer
+from PyQt6.QtCore import Qt, QSize, QTimer, QDate, QTime
 from PyQt6.QtGui import QPixmap, QImage, QKeySequence, QShortcut, QIcon, QFont
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QGroupBox,
     QLabel, QMessageBox, QFileDialog, QScrollArea, QSlider,
-    QDialog, QTextEdit, QListWidget, QListWidgetItem, QLineEdit
+    QDialog, QTextEdit, QListWidget, QListWidgetItem, QLineEdit,
+    QFormLayout, QComboBox, QDateEdit, QTimeEdit, QSpinBox,
+    QFrame, QSizePolicy, QSplitter,
 )
-# Importações compartilhadas
+# Acesso a dados → Database
+from Database import carregar_condominos, existe_dados
+# Constantes / utilitários
 from Commons import (
     BASE_DIR,
     DOCS_DIR,
     ICONS_DIR,
-    carregar_db,
-    existe_dados
 )
+# Geração de ata (opcional — não bloqueia o arranque da app)
+try:
+    from Gerar_Ata import carregar_dados_iniciais, gerar_ata, DOCX_AVAILABLE
+    ATA_AVAILABLE = True
+except ImportError as _e:
+    carregar_dados_iniciais = None  # type: ignore
+    gerar_ata = None  # type: ignore
+    DOCX_AVAILABLE = False
+    ATA_AVAILABLE = False
+    print(f"  ⚠️ Gerar_Ata indisponível: {_e}")
 # Importação condicional do PyMuPDF
 try:
     import fitz  # PyMuPDF
@@ -34,16 +48,48 @@ except ImportError:
     FITZ_AVAILABLE = False
 
 # ====================================================================
-# CONFIGURAÇÕES DE EMAIL
+# CONFIGURAÇÕES DE EMAIL (credenciais no .env — nunca no código)
 # ====================================================================
-SENDER_EMAIL = "42condominio@gmail.com"
-SENDER_PASSWORD = "ajmk cfdd zckh cqal"
-EMAIL_SUBJECT = "Envio da Ata da reunião e relatório de contas"
-EMAIL_BODY = """Caros condóminos,
-Serve a presente para vos enviar a Ata da reunião e o relatório de contas.
-Cumprimentos,
-Administração do Condomínio
-"""
+def _carregar_env_email():
+    """Carrega .env junto à app (e cwd) para Gmail / OpenRouter."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    candidatos = [
+        BASE_DIR / ".env",
+        Path.cwd() / ".env",
+        Path(__file__).resolve().parent / ".env",
+    ]
+    for p in candidatos:
+        if p.is_file():
+            # override=True: alterações no .env aplicam-se sem reiniciar a sessão Windows
+            load_dotenv(p, override=True)
+            return
+
+
+def _credenciais_gmail():
+    """Lê email/password do ambiente (sempre actualizado a partir do .env)."""
+    _carregar_env_email()
+    email = os.environ.get("GMAIL_SENDER_EMAIL", "42condominio@gmail.com").strip()
+    # App Password Gmail: os espaços são só visuais — SMTP quer 16 chars seguidos
+    password = os.environ.get("GMAIL_APP_PASSWORD", "").replace(" ", "").strip()
+    subject = os.environ.get(
+        "GMAIL_EMAIL_SUBJECT",
+        "Envio da Ata da reunião e relatório de contas",
+    )
+    body = os.environ.get(
+        "GMAIL_EMAIL_BODY",
+        "Caros condóminos,\n"
+        "Serve a presente para vos enviar a Ata da reunião e o relatório de contas.\n"
+        "Cumprimentos,\n"
+        "Administração do Condomínio\n",
+    )
+    return email, password, subject, body
+
+
+_carregar_env_email()
+SENDER_EMAIL, SENDER_PASSWORD, EMAIL_SUBJECT, EMAIL_BODY = _credenciais_gmail()
 
 # ====================================================================
 # FUNÇÕES DE ENVIO DE EMAIL (MANTIDAS LOCALMENTE)
@@ -58,7 +104,7 @@ def carregar_emails_condominos(pasta_dados):
         raise FileNotFoundError(f"Condominos não encontrado: {condominos_path}")
     contatos = []
     try:
-        rows, _ = carregar_db(condominos_path)
+        rows = carregar_condominos(condominos_path)
         for rec in rows:
             email = str(rec.get('EMAIL', '')).strip()
             nome = str(rec.get('NOME', '')).strip()
@@ -77,19 +123,35 @@ def carregar_emails_condominos(pasta_dados):
 
 def enviar_email_gmail_custom(destinatarios, anexos, assunto, corpo, contatos=None):
     """
-    Envia email via Gmail SMTP com anexos e conteúdo customizado
+    Envia email via Gmail SMTP com anexos e conteúdo customizado.
+
+    Tenta primeiro STARTTLS:587 (mais fiável em redes com proxy/firewall);
+    se falhar, tenta SSL:465.
     """
     if not destinatarios:
         return False, "Nenhum destinatário válido encontrado"
     if not anexos:
         return False, "Nenhum ficheiro selecionado para anexar"
+
+    sender_email, sender_password, _, _ = _credenciais_gmail()
+    if not sender_password:
+        return False, (
+            "Password de e-mail não configurada.\n"
+            "Defina GMAIL_APP_PASSWORD no ficheiro .env\n"
+            "(App Password do Google, 16 caracteres)."
+        )
+    if len(sender_password) < 16:
+        return False, (
+            f"GMAIL_APP_PASSWORD parece incompleta ({len(sender_password)} chars).\n"
+            "A App Password do Gmail tem 16 caracteres (pode colar com ou sem espaços)."
+        )
+
     try:
         message = MIMEMultipart()
-        message['Subject'] = assunto
-        message['From'] = SENDER_EMAIL
-        message['To'] = ", ".join(destinatarios)
-        html_part = MIMEText(corpo, 'plain', 'utf-8')
-        message.attach(html_part)
+        message["Subject"] = assunto
+        message["From"] = sender_email
+        message["To"] = ", ".join(destinatarios)
+        message.attach(MIMEText(corpo, "plain", "utf-8"))
         for anexo_path in anexos:
             if not Path(anexo_path).exists():
                 return False, f"Ficheiro não encontrado: {anexo_path}"
@@ -100,12 +162,41 @@ def enviar_email_gmail_custom(destinatarios, anexos, assunto, corpo, contatos=No
                 filename = Path(anexo_path).name
                 part.add_header(
                     "Content-Disposition",
-                    f"attachment; filename= {filename}",
+                    f'attachment; filename="{filename}"',
                 )
                 message.attach(part)
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-            server.login(SENDER_EMAIL, SENDER_PASSWORD)
-            server.sendmail(SENDER_EMAIL, destinatarios, message.as_string())
+
+        payload = message.as_string()
+        erros = []
+
+        # 1) STARTTLS na porta 587 (recomendado pelo Gmail)
+        try:
+            with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
+                server.login(sender_email, sender_password)
+                server.sendmail(sender_email, destinatarios, payload)
+        except Exception as e587:
+            erros.append(f"587/STARTTLS: {e587}")
+            # 2) Fallback SSL implícito na porta 465
+            try:
+                with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
+                    server.ehlo()
+                    server.login(sender_email, sender_password)
+                    server.sendmail(sender_email, destinatarios, payload)
+            except Exception as e465:
+                erros.append(f"465/SSL: {e465}")
+                detalhe = "\n".join(erros)
+                return False, (
+                    "Erro SMTP Gmail — ligação recusada ou credenciais inválidas.\n\n"
+                    f"{detalhe}\n\n"
+                    "Verifique:\n"
+                    "• GMAIL_APP_PASSWORD no .env (App Password, não a password normal)\n"
+                    "• Conta Google com verificação em 2 passos + App Password activa\n"
+                    "• Firewall/antivírus a bloquear portas 587 ou 465"
+                )
+
         msg = "Destinatários:\n"
         if contatos:
             for nome, email in contatos:
@@ -629,16 +720,25 @@ class DocsWidget(QWidget):
         super().__init__(parent)
         self.pasta_dados = pasta_dados
         self.viewer_window = None
+        self._condominos_cache = []
         self.init_ui()
+        self.carregar_form_ata()
 
     def init_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(15)
-        title = QLabel("Visualizar Documentos")
-        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #2F5597; padding: 6px;")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(12)
+
+        # ========== SECÇÃO 1: Visualizar Documentos ==========
+        grp_view = QGroupBox("Visualizar Documentos")
+        grp_view.setStyleSheet(
+            "QGroupBox { font-size: 14px; font-weight: bold; color: #2F5597; "
+            "border: 1px solid #c5d0e0; border-radius: 6px; margin-top: 10px; padding-top: 8px; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; }"
+        )
+        lay_view = QVBoxLayout(grp_view)
+        lay_view.setSpacing(8)
+
         btn_bar = QHBoxLayout()
         btn_selecionar = QPushButton("→ Selecionar PDF")
         btn_selecionar.setFixedSize(155, 42)
@@ -649,27 +749,365 @@ class DocsWidget(QWidget):
         btn_selecionar.clicked.connect(self.abrir_seletor_pdf)
         btn_bar.addWidget(btn_selecionar)
         btn_bar.addStretch()
-        layout.addLayout(btn_bar)
+        lay_view.addLayout(btn_bar)
+
         info_text = (
-            "Clique no botão acima para selecionar um documento PDF para visualização.\n"
-            "📁 Pasta de documentos padrão: docs/\n"
-            "🔍 Navegue com as setas ← → ou ↑ ↓ dentro do visualizador\n"
-            "📘 Controle de zoom com slider ou Ctrl++ / Ctrl+-\n"
-            "✉️ Use o botão de envelope para enviar documentos por email\n"
-            "⎋ ESC para fechar o visualizador"
+            "Selecione um documento PDF para visualização (pasta padrão: docs/)."
         )
         if FITZ_AVAILABLE:
-            info_text += "\n✅ PyMuPDF instalado - visualização disponível"
+            info_text += "  ✅ PyMuPDF disponível"
         else:
-            info_text += "\n❌ PyMuPDF não instalado\nExecute: pip install PyMuPDF"
+            info_text += "  ❌ PyMuPDF não instalado (pip install PyMuPDF)"
         info_label = QLabel(info_text)
-        info_label.setStyleSheet("color: #666; font-size: 11px; padding: 15px;")
+        info_label.setStyleSheet("color: #666; font-size: 11px; font-weight: normal;")
         info_label.setWordWrap(True)
-        layout.addWidget(info_label)
-        layout.addStretch()
+        lay_view.addWidget(info_label)
+
         self.status_label = QLabel("⏳ Aguardando seleção de documento...")
-        self.status_label.setStyleSheet("color: #666; font-style: italic;")
-        layout.addWidget(self.status_label)
+        self.status_label.setStyleSheet("color: #666; font-style: italic; font-weight: normal;")
+        lay_view.addWidget(self.status_label)
+
+        root.addWidget(grp_view)
+
+        # ========== SECÇÃO 2: Criar Ata de Reunião ==========
+        grp_ata = QGroupBox("Criar Ata de Reunião")
+        grp_ata.setStyleSheet(
+            "QGroupBox { font-size: 14px; font-weight: bold; color: #2F5597; "
+            "border: 1px solid #c5d0e0; border-radius: 6px; margin-top: 10px; padding-top: 8px; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; }"
+        )
+        lay_ata = QVBoxLayout(grp_ata)
+        lay_ata.setSpacing(12)
+        lay_ata.setContentsMargins(12, 14, 12, 10)
+
+        def _lbl(texto: str) -> QLabel:
+            w = QLabel(texto)
+            w.setStyleSheet("font-weight: normal; color: #333;")
+            return w
+
+        # ----- Linha 1: Anos | Nº Ata | Nº Administração |   | Data | Hora -----
+        row1 = QHBoxLayout()
+        row1.setSpacing(10)
+
+        self.lbl_anos = QLabel("—")
+        self.lbl_anos.setStyleSheet("font-weight: normal;")
+        row1.addWidget(_lbl("Anos (ant. → atual):"))
+        row1.addWidget(self.lbl_anos)
+        row1.addSpacing(16)
+
+        self.spin_num_ata = QSpinBox()
+        self.spin_num_ata.setRange(1, 999)
+        self.spin_num_ata.setValue(1)
+        self.spin_num_ata.setFixedWidth(60)
+        row1.addWidget(_lbl("Nº da Ata:"))
+        row1.addWidget(self.spin_num_ata)
+        row1.addSpacing(16)
+
+        self.spin_num_adm = QSpinBox()
+        self.spin_num_adm.setRange(1, 99)
+        self.spin_num_adm.setReadOnly(True)
+        self.spin_num_adm.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        self.spin_num_adm.setFixedWidth(50)
+        row1.addWidget(_lbl("Nº Administração:"))
+        row1.addWidget(self.spin_num_adm)
+
+        row1.addStretch(1)
+
+        self.date_edit = QDateEdit()
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDisplayFormat("dd-MM-yyyy")
+        self.date_edit.setDate(QDate.currentDate())
+        self.date_edit.setFixedWidth(110)
+        row1.addWidget(_lbl("Data da reunião:"))
+        row1.addWidget(self.date_edit)
+        row1.addSpacing(16)
+
+        self.time_ini = QTimeEdit()
+        self.time_ini.setDisplayFormat("HH:mm")
+        self.time_ini.setTime(QTime(20, 0))
+        self.time_ini.setFixedWidth(70)
+        self.time_fim = QTimeEdit()
+        self.time_fim.setDisplayFormat("HH:mm")
+        self.time_fim.setTime(QTime(22, 0))
+        self.time_fim.setFixedWidth(70)
+        row1.addWidget(_lbl("Hora (início → fim):"))
+        row1.addWidget(self.time_ini)
+        row1.addWidget(_lbl("→"))
+        row1.addWidget(self.time_fim)
+        lay_ata.addLayout(row1)
+
+        # ----- Linha 2: Admin. cessante | Fração |   | Novo admin | Fr. | Andar -----
+        row2 = QHBoxLayout()
+        row2.setSpacing(10)
+
+        self.edit_admin_ant = QLineEdit()
+        self.edit_admin_ant.setPlaceholderText("Administrador cessante")
+        self.edit_admin_ant.setMinimumWidth(180)
+        row2.addWidget(_lbl("Admin. cessante:"))
+        row2.addWidget(self.edit_admin_ant, 2)
+
+        self.edit_fracao_ant = QLineEdit()
+        self.edit_fracao_ant.setFixedWidth(44)
+        self.edit_fracao_ant.setPlaceholderText("Fr.")
+        row2.addWidget(_lbl("Fração:"))
+        row2.addWidget(self.edit_fracao_ant)
+
+        row2.addSpacing(24)
+
+        self.combo_novo_admin = QComboBox()
+        self.combo_novo_admin.setMinimumWidth(180)
+        self.combo_novo_admin.currentIndexChanged.connect(self._on_novo_admin_changed)
+        row2.addWidget(_lbl("Novo administrador:"))
+        row2.addWidget(self.combo_novo_admin, 2)
+
+        self.edit_fracao = QLineEdit()
+        self.edit_fracao.setFixedWidth(44)
+        self.edit_fracao.setPlaceholderText("Fr.")
+        row2.addWidget(_lbl("Fr.:"))
+        row2.addWidget(self.edit_fracao)
+
+        self.edit_andar = QLineEdit()
+        self.edit_andar.setPlaceholderText("Andar")
+        self.edit_andar.setFixedWidth(90)
+        row2.addWidget(_lbl("Andar:"))
+        row2.addWidget(self.edit_andar)
+        lay_ata.addLayout(row2)
+
+        # ----- Linha 3: CC |   | Validade | NIF -----
+        row3 = QHBoxLayout()
+        row3.setSpacing(10)
+
+        self.edit_cc = QLineEdit()
+        self.edit_cc.setPlaceholderText("N.º Cartão de Cidadão")
+        row3.addWidget(_lbl("CC / NIF:"))
+        row3.addWidget(self.edit_cc, 3)
+
+        row3.addSpacing(24)
+
+        self.edit_cc_val = QLineEdit()
+        self.edit_cc_val.setPlaceholderText("dd-mm-aaaa")
+        self.edit_cc_val.setFixedWidth(110)
+        row3.addWidget(_lbl("Validade:"))
+        row3.addWidget(self.edit_cc_val)
+        row3.addSpacing(16)
+
+        self.edit_nif = QLineEdit()
+        self.edit_nif.setPlaceholderText("NIF")
+        self.edit_nif.setFixedWidth(100)
+        row3.addWidget(_lbl("NIF:"))
+        row3.addWidget(self.edit_nif)
+        lay_ata.addLayout(row3)
+
+        # --- assuntos de interesse geral (máximo espaço vertical) ---
+        lbl_assuntos = QLabel("4. Assuntos de interesse geral:")
+        lbl_assuntos.setStyleSheet("font-weight: bold; color: #333; margin-top: 8px;")
+        lay_ata.addWidget(lbl_assuntos)
+
+        self.txt_assuntos = QTextEdit()
+        self.txt_assuntos.setPlaceholderText(
+            "Texto das deliberações do ponto 4 (quotas, obras, testes, etc.).\n"
+            "Pode editar livremente o texto sugerido."
+        )
+        self.txt_assuntos.setMinimumHeight(180)
+        self.txt_assuntos.setStyleSheet("font-weight: normal; font-size: 12px;")
+        self.txt_assuntos.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        lay_ata.addWidget(self.txt_assuntos, 1)
+
+        # --- botões ---
+        btn_row = QHBoxLayout()
+        self.btn_gerar = QPushButton("📄  Gerar Ata (.docx)")
+        self.btn_gerar.setFixedHeight(40)
+        self.btn_gerar.setStyleSheet(
+            "QPushButton { background-color: #2F5597; color: white; font-weight: bold; "
+            "border-radius: 5px; padding: 6px 16px; }"
+            "QPushButton:hover { background-color: #3a6bb0; }"
+            "QPushButton:pressed { background-color: #244578; }"
+        )
+        self.btn_gerar.clicked.connect(self.gerar_ata_clicked)
+
+        #self.btn_recarregar = QPushButton("🔄")
+        #self.btn_recarregar.setFixedSize(40, 40)
+        #self.btn_recarregar.setToolTip("Recarregar dados da base de dados")
+        #self.btn_recarregar.clicked.connect(self.carregar_form_ata)
+
+        btn_row.addWidget(self.btn_gerar)
+        #btn_row.addWidget(self.btn_recarregar)
+        btn_row.addStretch()
+        lay_ata.addLayout(btn_row)
+
+        self.lbl_ata_status = QLabel("")
+        self.lbl_ata_status.setStyleSheet("color: #666; font-style: italic; font-weight: normal;")
+        self.lbl_ata_status.setWordWrap(True)
+        lay_ata.addWidget(self.lbl_ata_status)
+
+        root.addWidget(grp_ata, 1)
+
+    # ------------------------------------------------------------------
+    # Carregamento / preenchimento do formulário
+    # ------------------------------------------------------------------
+
+    def carregar_form_ata(self):
+        """Pré-preenche o formulário com dados da BD."""
+        if not ATA_AVAILABLE or carregar_dados_iniciais is None:
+            self.lbl_ata_status.setText(
+                "⚠️ Módulo Gerar_Ata indisponível. Verifique se python-docx está instalado "
+                "(pip install python-docx)."
+            )
+            return
+        try:
+            dados = carregar_dados_iniciais(self.pasta_dados)
+        except Exception as e:
+            self.lbl_ata_status.setText(f"⚠️ Erro ao carregar dados: {e}")
+            return
+
+        self.spin_num_adm.setValue(int(dados.get("num_adm") or 1))
+        ano = dados.get("ano_exercicio") or date.today().year
+        ano_ant = dados.get("ano_exercicio_ant") or (ano - 1)
+        self.lbl_anos.setText(f"{ano_ant}  →  {ano}")
+        self._ano_exercicio = ano
+        self._ano_exercicio_ant = ano_ant
+
+        self.spin_num_ata.setValue(int(dados.get("num_ata") or 1))
+
+        d = dados.get("data") or date.today()
+        if isinstance(d, date):
+            self.date_edit.setDate(QDate(d.year, d.month, d.day))
+
+        hi = dados.get("hora_inicial") or time(20, 0)
+        hf = dados.get("hora_final") or time(22, 0)
+        self.time_ini.setTime(QTime(hi.hour, hi.minute))
+        self.time_fim.setTime(QTime(hf.hour, hf.minute))
+
+        self.edit_admin_ant.setText(dados.get("admin_ant") or "")
+        self.edit_fracao_ant.setText(dados.get("fracao_ant") or "")
+
+        self._condominos_cache = dados.get("condominos") or []
+        self.combo_novo_admin.blockSignals(True)
+        self.combo_novo_admin.clear()
+        self.combo_novo_admin.addItem("— selecionar —", None)
+        idx_novo = 0
+        nome_novo = (dados.get("administrador") or "").strip()
+        for i, c in enumerate(self._condominos_cache, start=1):
+            nome = c.get("NOME") or ""
+            self.combo_novo_admin.addItem(nome, c)
+            if nome_novo and nome == nome_novo:
+                idx_novo = i
+        self.combo_novo_admin.setCurrentIndex(idx_novo)
+        self.combo_novo_admin.blockSignals(False)
+        # Preencher CC/NIF/fração do novo admin já selecionado
+        self._on_novo_admin_changed(idx_novo)
+
+        self.txt_assuntos.setPlainText(dados.get("assuntos_gerais") or "")
+        self.lbl_ata_status.setText("Dados carregados da base de dados.")
+
+    def _on_novo_admin_changed(self, index: int):
+        data = self.combo_novo_admin.itemData(index)
+        if not data:
+            self.edit_fracao.clear()
+            self.edit_andar.clear()
+            self.edit_cc.clear()
+            self.edit_cc_val.clear()
+            self.edit_nif.clear()
+            return
+        self.edit_fracao.setText(str(data.get("FRACAO") or ""))
+        self.edit_andar.setText(str(data.get("ANDAR") or ""))
+        self.edit_cc.setText(str(data.get("CC_NUMERO") or ""))
+        self.edit_cc_val.setText(str(data.get("CC_VALIDADE") or ""))
+        self.edit_nif.setText(str(data.get("NIF") or ""))
+
+    def _recolher_dados_form(self) -> dict:
+        qd = self.date_edit.date()
+        data_py = date(qd.year(), qd.month(), qd.day())
+        ti = self.time_ini.time()
+        tf = self.time_fim.time()
+
+        nome_novo = ""
+        data_combo = self.combo_novo_admin.currentData()
+        if data_combo:
+            nome_novo = data_combo.get("NOME") or ""
+        else:
+            txt = self.combo_novo_admin.currentText().strip()
+            if txt and not txt.startswith("—"):
+                nome_novo = txt
+
+        return {
+            "num_adm": self.spin_num_adm.value(),
+            "ano_exercicio": getattr(self, "_ano_exercicio", date.today().year),
+            "ano_exercicio_ant": getattr(self, "_ano_exercicio_ant", date.today().year - 1),
+            "num_ata": self.spin_num_ata.value(),
+            "data": data_py,
+            "hora_inicial": time(ti.hour(), ti.minute()),
+            "hora_final": time(tf.hour(), tf.minute()),
+            "admin_ant": self.edit_admin_ant.text().strip(),
+            "fracao_ant": self.edit_fracao_ant.text().strip(),
+            "administrador": nome_novo,
+            "fracao": self.edit_fracao.text().strip(),
+            "andar": self.edit_andar.text().strip(),
+            "cc_numero": self.edit_cc.text().strip(),
+            "cc_validade": self.edit_cc_val.text().strip(),
+            "nif": self.edit_nif.text().strip(),
+            "assuntos_gerais": self.txt_assuntos.toPlainText().strip(),
+        }
+
+    def gerar_ata_clicked(self):
+        if not ATA_AVAILABLE or gerar_ata is None:
+            QMessageBox.warning(
+                self, "Módulo indisponível",
+                "Não foi possível carregar Gerar_Ata.\n"
+                "Instale a dependência:\n\npip install python-docx"
+            )
+            return
+        if not DOCX_AVAILABLE:
+            QMessageBox.warning(
+                self, "python-docx em falta",
+                "A biblioteca python-docx não está instalada.\n\n"
+                "Execute no terminal:\npip install python-docx"
+            )
+            return
+        dados = self._recolher_dados_form()
+        if not dados.get("admin_ant"):
+            QMessageBox.warning(
+                self, "Dados em falta",
+                "Indique o nome do administrador cessante (em exercício)."
+            )
+            return
+        if not dados.get("administrador"):
+            QMessageBox.warning(
+                self, "Dados em falta",
+                "Selecione o novo administrador."
+            )
+            return
+
+        try:
+            path = gerar_ata(self.pasta_dados, dados)
+            self.lbl_ata_status.setText(f"✅ Ata gerada: {path.name}")
+            resp = QMessageBox.information(
+                self,
+                "Ata gerada",
+                f"Documento criado com sucesso:\n\n{path}\n\n"
+                "Deseja abrir a pasta docs/?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if resp == QMessageBox.StandardButton.Yes:
+                self.abrir_pasta_docs()
+        except Exception as e:
+            self.lbl_ata_status.setText(f"❌ Erro: {e}")
+            QMessageBox.critical(self, "Erro ao gerar ata", str(e))
+
+    def abrir_pasta_docs(self):
+        pasta = DOCS_DIR
+        pasta.mkdir(parents=True, exist_ok=True)
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(str(pasta))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                os.system(f'open "{pasta}"')
+            else:
+                os.system(f'xdg-open "{pasta}"')
+        except Exception as e:
+            QMessageBox.information(self, "Pasta docs/", f"Pasta:\n{pasta}\n\n({e})")
 
     def abrir_seletor_pdf(self):
         if not FITZ_AVAILABLE:
@@ -705,6 +1143,7 @@ class DocsWidget(QWidget):
 
     def set_pasta_dados(self, pasta_dados):
         self.pasta_dados = pasta_dados
+        self.carregar_form_ata()
 
 # ====================================================================
 # TESTE STANDALONE

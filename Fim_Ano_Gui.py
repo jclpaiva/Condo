@@ -14,7 +14,24 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from Commons import BASE_DIR, carregar_db, existe_dados
+# Constantes
+from Commons import BASE_DIR
+# Acesso a dados → Database
+from Database import carregar_movimentos_fonte, resolver_pasta, existe_dados
+import os
+
+
+def _password_fim_ano() -> str:
+    """Password de encerramento de ano (`.env` → FIM_ANO_PASSWORD)."""
+    try:
+        from dotenv import load_dotenv
+        for p in (BASE_DIR / ".env", Path.cwd() / ".env"):
+            if p.is_file():
+                load_dotenv(p, override=True)
+                break
+    except ImportError:
+        pass
+    return (os.environ.get("FIM_ANO_PASSWORD") or "admin123").strip()
 
 # ====================================================================
 # CANVAS PARA PIE CHART DE PROGRESSO
@@ -86,7 +103,8 @@ class FimAnoWorker(QThread):
             import sys
             from pathlib import Path
 
-            pasta_trabalho = BASE_DIR / self.pasta_dados
+            from Commons import pasta_de_dados
+            pasta_trabalho = pasta_de_dados(self.pasta_dados)
             script_dir = str(BASE_DIR)
             if script_dir not in sys.path:
                 sys.path.insert(0, script_dir)
@@ -118,6 +136,11 @@ class FimAnoWorker(QThread):
 # WIDGET PRINCIPAL
 # ====================================================================
 class FimAnoWidget(QWidget):
+    # Emitido quando o encerramento termina com sucesso — Main_Gui deve
+    # refrescar todos os dataforms (Bancos, DPrazo, Caixa, Receitas, …)
+    # para refletir os dados do ano seguinte gravados na BD.
+    dados_atualizados = pyqtSignal()
+
     def __init__(self, pasta_dados=None, parent=None):
         super().__init__(parent)
         self.pasta_dados = pasta_dados
@@ -346,16 +369,19 @@ class FimAnoWidget(QWidget):
 
     def set_pasta_dados(self, pasta_dados):
         """Define pasta de dados"""
+        from Commons import pasta_de_dados
         self.pasta_dados = pasta_dados
+        self.pasta = pasta_de_dados(pasta_dados)
 
     def validar_movimentos_bancarios(self):
         """Valida se existem movimentos em todos os meses do ano (condominio.db)."""
         try:
-            bancos_path = BASE_DIR / self.pasta_dados / "Bancos"
-            if not existe_dados(bancos_path):
+            from Commons import pasta_de_dados
+            pasta = getattr(self, "pasta", None) or pasta_de_dados(self.pasta_dados)
+            if not existe_dados(pasta):
                 return True
 
-            rows, _ = carregar_db(bancos_path)
+            rows = carregar_movimentos_fonte(pasta, 'bancos')
             meses_com_movimento = set()
             for rec in rows:
                 descricao = str(rec.get('DESCRICAO', '')).strip()
@@ -370,24 +396,38 @@ class FimAnoWidget(QWidget):
                         pass
 
             if len(meses_com_movimento) < 12:
-                meses_nomes = ["JAN", "FEV", "MAR", "ABR", "MAI", "JUN", 
-                              "JUL", "AGO", "SET", "OUT", "NOV", "DEZ"]
+                # Nomes completos para mensagens ao utilizador (não abreviaturas)
+                meses_nomes = [
+                    "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+                    "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro",
+                ]
                 ultimo_mes = max(meses_com_movimento) if meses_com_movimento else 0
-                ultimo_mes_nome = meses_nomes[ultimo_mes - 1] if ultimo_mes > 0 else "NENHUM"
-                
+                ultimo_mes_nome = (
+                    meses_nomes[ultimo_mes - 1] if ultimo_mes > 0 else "nenhum"
+                )
+                meses_em_falta = [
+                    meses_nomes[m - 1]
+                    for m in range(1, 13)
+                    if m not in meses_com_movimento
+                ]
+                lista_falta = ", ".join(meses_em_falta)
+
                 from PyQt6.QtWidgets import QMessageBox
                 msg = QMessageBox(self)
                 msg.setIcon(QMessageBox.Icon.Warning)
-                msg.setWindowTitle("⚠️ Aviso: Movimentos Incompletos")
-                msg.setText(f"⚠️ ATENÇÃO: Só existem movimentos até {ultimo_mes_nome}!")
+                msg.setWindowTitle("Aviso: <b>Movimentos incompletos</b>")
+                msg.setText(
+                    f"Atenção: só existem movimentos até <b>{ultimo_mes_nome}</b>."
+                )
                 msg.setInformativeText(
-                    f"Foram detectados movimentos apenas em {len(meses_com_movimento)} meses.\n"
-                    f"Último mês com movimentos: {ultimo_mes_nome}\n\n"
+                    f"Meses sem movimentos: <b>{lista_falta}</b><br><br>"
                     f"Deseja realmente encerrar o ano agora?"
                 )
-                msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                msg.setStandardButtons(
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
                 msg.setDefaultButton(QMessageBox.StandardButton.No)
-                
+
                 return msg.exec() == QMessageBox.StandardButton.Yes
             
             return True
@@ -403,8 +443,9 @@ class FimAnoWidget(QWidget):
             self.status_label.setStyleSheet("color: #f44336; font-weight: bold;")
             return
 
-        # Valida password
-        if self.password_input.text() != "admin123":
+        # Valida password (FIM_ANO_PASSWORD no .env; default admin123 só para compat)
+        expected = _password_fim_ano()
+        if self.password_input.text() != expected:
             self.status_label.setText("❌ Password incorreta!")
             self.status_label.setStyleSheet("color: #f44336; font-weight: bold;")
             self.password_input.clear()
@@ -441,19 +482,29 @@ class FimAnoWidget(QWidget):
         if sucesso:
             # Limpa password
             self.password_input.clear()
-            
+
             # Atualiza informações com checkmarks
             self.set_info_final()
-            
+
             # Mensagem de sucesso
             self.status_label.setText("✅ Encerramento concluído - A refrescar dados...")
             self.status_label.setStyleSheet("color: #4CAF50; font-weight: bold; font-size: 14px;")
-            
+
             # Progresso 100%
             self.progress_pie.set_percentage(100)
-            
+
+            # Notifica Main_Gui para recarregar Bancos, DPrazo, Caixa,
+            # Receitas, Despesas, Balanço, Dashboard, etc. a partir da BD
+            # já actualizada para o ano seguinte.
+            self.dados_atualizados.emit()
+
             # Atualiza mensagem após 1 segundo
-            QTimer.singleShot(1000, lambda: self.status_label.setText("✅ Encerramento concluído - Dados atualizados!"))
+            QTimer.singleShot(
+                1000,
+                lambda: self.status_label.setText(
+                    "✅ Encerramento concluído - Dados do novo ano sincronizados!"
+                ),
+            )
         else:
             self.status_label.setText(f"❌ Erro: {mensagem}")
             self.status_label.setStyleSheet("color: #f44336; font-weight: bold;")

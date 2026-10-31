@@ -1,0 +1,11 @@
+PyQt6
+pandas
+matplotlib
+reportlab
+requests
+python-dotenv
+openpyxl
+xlrd
+pymupdf
+python-docx
+pyinstaller

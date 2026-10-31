@@ -6,7 +6,7 @@
 # Integração na aplicação:
 #   - Configuracoes_Gui → analyze_and_update(csv, configs_path)
 #   - Bancos._detetar_params_importacao → CSVAnalyzer(csv).analyze()
-#   - Persistência via bridge Commons.carregar_db / salvar_db → condominio.db
+#   - Persistência via guardar_configs / carregar_configs → condominio.db
 
 from __future__ import annotations
 
@@ -19,9 +19,8 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from Database import carregar_db, salvar_db
-
-# from Commons import (data API → Database)
+from Commons import BASE_DIR, IMPORT_DIR
+from Database import carregar_configs, guardar_configs, resolver_pasta
 
 # ---------------------------------------------------------------------------
 # Padrões reutilizáveis
@@ -110,9 +109,14 @@ class CSVAnalyzer:
 
     DELIMITERS = [";", ",", "\t", "|"]
 
-    def __init__(self, file_path: str | Path):
+    def __init__(self, file_path: str | Path, encoding: str = "cp1252"):
+        """
+        'encoding' é sempre o código de página configurado em Configs.COD_PAGINA
+        (lido pelo chamador). Este módulo nunca tenta adivinhar a codificação
+        a partir dos bytes do ficheiro.
+        """
         self.file_path = Path(file_path)
-        self.encoding: str | None = None
+        self.encoding: str = encoding
         self.lines: list[str] = []
         self.delimiter: str | None = None
         self.header_index: int | None = None
@@ -122,26 +126,9 @@ class CSVAnalyzer:
         self.sample_rows: list[list[str]] = []  # campos já partidos
 
     # ------------------------------------------------------------------
-    # 1. Encoding + carga
+    # 1. Carga do ficheiro (encoding vem sempre de Configs.COD_PAGINA)
     # ------------------------------------------------------------------
-    def detect_encoding(self) -> str:
-        candidates = ["utf-8-sig", "cp1252", "latin-1", "utf-8", "cp850", "iso-8859-1"]
-        for enc in candidates:
-            try:
-                with open(self.file_path, "r", encoding=enc, errors="strict") as f:
-                    for _ in range(80):
-                        if not f.readline():
-                            break
-                self.encoding = enc
-                return enc
-            except (UnicodeDecodeError, UnicodeError):
-                continue
-        self.encoding = "cp1252"
-        return self.encoding
-
     def load_file(self) -> bool:
-        if not self.encoding:
-            self.detect_encoding()
         try:
             with open(self.file_path, "r", encoding=self.encoding, errors="replace") as f:
                 self.lines = [ln.rstrip("\n\r") for ln in f]
@@ -571,6 +558,7 @@ class CSVAnalyzer:
             "CSV_FIRST_ROW": int(self.data_start_row) + 1,  # 1-based
             "CSV_THOUSANDS": str(thou),
             "TOTAL_COLUMNS": int(self.total_columns),
+            "COD_PAGINA": self.encoding,
         }
 
         print("\n  ✓ Parâmetros finais:")
@@ -581,22 +569,48 @@ class CSVAnalyzer:
 
 
 # ===========================================================================
-# Persistência em Configs (via bridge → condominio.db)
+# Persistência em Configs (guardar_configs → condominio.db)
 # ===========================================================================
 
 def _resolver_configs_path(configs_path: str | Path) -> Path:
     """
-    Normaliza o caminho lógico de Configs para o bridge.
+    Normaliza o caminho de Configs (padrão Commons / Bancos_Gui).
+
     Aceita:
-      - Path/str absoluto ou relativo para .../Configs
-      - pasta de dados (usa Configs dentro dela)
-      - apenas o nome 'Configs'
+      - path absoluto/relativo para .../Configs
+      - pasta de dados (ex. corrente ou BASE_DIR/corrente) → pasta/Configs
+      - apenas 'Configs' → BASE_DIR/corrente/Configs
     """
     p = Path(configs_path)
-    if p.is_dir():
-        return p / "Configs"
-    # se vier só o nome sem pasta, o bridge resolve via PASTA_CORRENTE no parent
+    if p.name.upper() == "CONFIGS":
+        # Já é o endpoint Configs (absoluto ou relativo)
+        if not p.is_absolute():
+            # 'Configs' sozinho → pasta corrente da app
+            return BASE_DIR / "corrente" / "Configs"
+        return p
+    # Pasta de dados (existente ou nome lógico, ex. 'corrente')
+    if p.is_dir() or not p.suffix:
+        base = p if p.is_absolute() else (BASE_DIR / p)
+        return base / "Configs"
     return p
+
+
+def _ler_cod_pagina(configs_path: str | Path) -> str:
+    """
+    Lê o código de página configurado em Configs (CHAVE 'COD_PAGINA').
+    Se Configs ainda não existir ou a chave não estiver definida (primeira
+    análise), assume 'cp1252' — nunca se tenta adivinhar a partir do ficheiro.
+    """
+    try:
+        rows = carregar_configs(_resolver_configs_path(configs_path))
+        for row in rows:
+            if str(row.get("CHAVE", "")).strip() == "COD_PAGINA":
+                valor = str(row.get("VALOR", "")).strip()
+                if valor:
+                    return valor
+    except Exception as e:
+        print(f"  ⚠️  Não foi possível ler COD_PAGINA de Configs ({e}); a usar 'cp1252'")
+    return "cp1252"
 
 
 def update_configs_db(parameters: dict, configs_path: str | Path = "Configs") -> bool:
@@ -618,11 +632,12 @@ def update_configs_db(parameters: dict, configs_path: str | Path = "Configs") ->
         "CSV_FIRST_ROW": ("Number", "1 linha dados no CSV"),
         "CSV_THOUSANDS": ("String", "Separador milhares"),
         "TOTAL_COLUMNS": ("Number", "Total de colunas no CSV"),
+        "COD_PAGINA": ("String", "Codigo de pagina CSV (ex: cp1252)"),
     }
 
     try:
         configs_path = _resolver_configs_path(configs_path)
-        rows, _ = carregar_db(configs_path)
+        rows = carregar_configs(configs_path)
         novas = set(parameters.keys())
         rows = [
             r for r in rows
@@ -643,9 +658,9 @@ def update_configs_db(parameters: dict, configs_path: str | Path = "Configs") ->
             print(f"  ✓ {key:<18} = {val}")
 
         df = pd.DataFrame(rows, dtype=object)
-        ok = salvar_db(df, str(configs_path), None)
+        ok = guardar_configs(df, pasta=configs_path)
         if not ok:
-            raise RuntimeError("salvar_db falhou para Configs")
+            raise RuntimeError("guardar_configs falhou")
         print(f"  ✓ {len(parameters)} parâmetros IMPORTACAO gravados em condominio.db")
         print("-" * 72)
         return True
@@ -679,7 +694,8 @@ def analyze_and_update(
     print(f"🔎 VERIFICAÇÃO AUTOMÁTICA — {os.path.basename(csv_path)}")
     print("=" * 72)
 
-    analyzer = CSVAnalyzer(csv_path)
+    cod_pagina = _ler_cod_pagina(configs_path)
+    analyzer = CSVAnalyzer(csv_path, encoding=cod_pagina)
     params = analyzer.analyze()
     if params is None:
         msg = "Não foi possível detetar a estrutura automaticamente"
@@ -687,7 +703,7 @@ def analyze_and_update(
         return False, msg, None
 
     if update_configs_db(params, configs_path):
-        msg = "CONFIGS ATUALIZADO COM SUCESSO"
+        msg = "Configs atualizado com sucesso!"
         print(f"\n✅ {msg}")
         return True, msg, params
 
@@ -699,19 +715,29 @@ def analyze_and_update(
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Uso: python Analisar_csv.py <ficheiro.csv> [Configs] [--dry-run]")
+        print("Uso: python Analisar_csv.py <ficheiro.csv> [pasta_dados|Configs] [--dry-run]")
+        print(f"  Pasta import por defeito: {IMPORT_DIR}")
+        print(f"  BASE_DIR: {BASE_DIR}")
         sys.exit(1)
 
     args = [a for a in sys.argv[1:] if a not in ("--dry-run", "-n")]
     dry = "--dry-run" in sys.argv or "-n" in sys.argv
 
-    csv_file = args[0]
-    if not os.path.isabs(csv_file):
-        csv_file = os.path.join(os.getcwd(), csv_file)
-    cfg = args[1] if len(args) > 1 else "Configs"
+    csv_file = Path(args[0])
+    if not csv_file.is_absolute():
+        # Igual ao diálogo de Bancos_Gui: prioriza a pasta import/
+        candidate = IMPORT_DIR / csv_file
+        csv_file = candidate if candidate.exists() else (Path.cwd() / csv_file)
+    csv_file = str(csv_file.resolve())
+
+    # Configs: pasta de dados (ex. corrente) ou path .../Configs — padrão Commons
+    if len(args) > 1:
+        cfg = args[1]
+    else:
+        cfg = str(BASE_DIR / "corrente" / "Configs")
 
     if dry:
-        p = CSVAnalyzer(csv_file).analyze()
+        p = CSVAnalyzer(csv_file, encoding=_ler_cod_pagina(cfg)).analyze()
         sys.exit(0 if p else 1)
 
     ok, _, _ = analyze_and_update(csv_file, cfg)

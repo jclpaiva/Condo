@@ -15,155 +15,29 @@ from datetime import datetime
 from Logging_utils import ativar_logging
 from pathlib import Path
 from Commons import clean_numeric
-from Database import carregar_db, salvar_db
+from Database import (
+    resolver_pasta,
+    save_despesas_wide,
+    load_despesas_wide,
+    aglutinar_movimentos,
+)
 
 logger = ativar_logging("despesas")
-
-class PrintToLogger:
-    def write(self, msg):
-        msg = msg.rstrip()
-        if msg:
-            logger.info(msg)
-
-    def flush(self):
-        pass
-
-sys.stdout = PrintToLogger()
-sys.stderr = PrintToLogger()
-
-# ====================================================================
-# AGLUTINAÇÃO DE MOVIMENTOS (BANCOS + CAIXA)
-# ====================================================================
-def aglutinar_movimentos(bancos_db_path, caixa_db_path):
-    """
-    Aglutina movimentos de Bancos e Caixa.
-    Retorna DataFrame com: DATA, TIPO, CONTA, VALOR, DESCRICAO, OBSERVACAO
-    """
-    print(f"\n{'='*80}")
-    print("🔄 AGLUTINAÇÃO DE MOVIMENTOS (BANCOS + CAIXA)")
-    print(f"{'='*80}")
-    df_bancos = pd.DataFrame()
-    df_caixa = pd.DataFrame()
-
-    # Carrega Bancos
-    try:
-        rows_bancos, _ = carregar_db(bancos_db_path)
-        df_bancos = pd.DataFrame(rows_bancos, dtype=object)
-        print(f"  ✅ Bancos: {len(df_bancos)} registos")
-    except FileNotFoundError:
-        print(f"  ⚠️  Bancos não encontrado")
-    except Exception as e:
-        print(f"  ❌ Erro ao ler Bancos: {e}")
-
-    # Carrega Caixa
-    try:
-        rows_caixa, _ = carregar_db(caixa_db_path)
-        df_caixa = pd.DataFrame(rows_caixa, dtype=object)
-        print(f"  ✅ Caixa: {len(df_caixa)} registos")
-    except FileNotFoundError:
-        print(f"  ⚠️  Caixa não encontrado")
-    except Exception as e:
-        print(f"  ❌ Erro ao ler Caixa: {e}")
-
-    # Une ambos
-    if df_bancos.empty and df_caixa.empty:
-        print(f"  ❌ ERRO: Nenhum movimento encontrado")
-        return pd.DataFrame()
-
-    dfs_to_concat = []
-    if not df_bancos.empty:
-        # Garantir que todas as colunas necessárias existem
-        for col in ['DESCRICAO', 'OBSERVACAO']:
-            if col not in df_bancos.columns:
-                df_bancos[col] = ""
-        df_bancos = df_bancos[['DATA', 'TIPO', 'CONTA', 'DESCRICAO', 'VALOR', 'OBSERVACAO']].copy()
-        dfs_to_concat.append(df_bancos)
-
-    if not df_caixa.empty:
-        for col in ['DESCRICAO', 'OBSERVACAO']:
-            if col not in df_caixa.columns:
-                df_caixa[col] = ""
-        df_caixa = df_caixa[['DATA', 'TIPO', 'CONTA', 'DESCRICAO', 'VALOR', 'OBSERVACAO']].copy()
-        dfs_to_concat.append(df_caixa)
-
-    df_movimentos = pd.concat(dfs_to_concat, ignore_index=True)
-    print(f"\n📊 Total aglutinado: {len(df_movimentos)} movimentos")
-
-    # Remove duplicados
-    antes = len(df_movimentos)
-    df_movimentos = df_movimentos.drop_duplicates(
-        subset=['DATA', 'CONTA', 'VALOR'],
-        keep='first'
-    ).reset_index(drop=True)
-    if antes > len(df_movimentos):
-        print(f"  🧹 Removidos {antes - len(df_movimentos)} duplicados")
-
-    # Ordena por data
-    df_movimentos = df_movimentos.sort_values('DATA').reset_index(drop=True)
-    print(f"  ✅ DataFrame final: {len(df_movimentos)} movimentos únicos")
-    print(f"{'='*80}\n")
-    return df_movimentos
+# ativar_logging já redirecciona stdout/stderr para o ficheiro de log.
 
 # ====================================================================
 # AGREGAR DESPESAS POR CONTA E MÊS
 # ====================================================================
-#def agregar_despesas_por_mes(df_movimentos):
-#    """
-#    Agrega despesas por CONTA e MÊS, replicando a lógica do VBA.
-#    Aceita DataFrame já aglutinado (Bancos + Caixa).
-#    """
-    # Filtra apenas DESPESAS
-    #df_despesas = df_movimentos[df_movimentos['TIPO'].str.upper().str.strip() == 'DESPESA'].copy()
-    
-#    df_despesas = df_movimentos[
-#        (df_movimentos['TIPO'].str.upper().str.strip() == 'DESPESA') &
-#        (~df_movimentos['CONTA'].str.upper().str.contains('DEPÓSITO|DEPOSITO|SALDO ANTERIOR', na=False)) &
-#        (~df_movimentos['DESCRICAO'].str.upper().str.contains('DEPÓSITO|DEPOSITO|ENTRADA|CRÉDITO|SALDO INICIAL', na=False)) &
-#        (df_movimentos['VALOR'] < 0)  # opcional: garante que é saída (valor negativo)
-#    ].copy()
-       
-
-#    print(f"DEBUG: {len(df_despesas)} despesas encontradas para processar")
-#    if df_despesas.empty:
-#        print("AVISO: Nenhuma despesa encontrada")
-#        return {}
-    
-#    Dicionário: {Conta: {mes: valor}}
-#    dados_agregados = defaultdict(lambda: defaultdict(float))
-#    contas_com_valor = set()
-#    for _, row in df_despesas.iterrows():
-#      if pd.isna(row['DATA']):
-#            continue
-#        try:
-#            if isinstance(row['DATA'], datetime):
-#                mes = row['DATA'].month
-#            else:
-#                mes = pd.to_datetime(row['DATA']).month
-#        except:
-#            continue
-
-#      c   onta = str(row['CONTA']).strip()
-#      if   not conta or conta == '':
-#            continue
-
-#        valor = abs(clean_numeric(row['VALOR']))
-#        dados_agregados[conta][mes] += valor
-#        contas_com_valor.add(conta)
-
-#    print(f"DEBUG: Agregação concluída. {len(contas_com_valor)} contas com despesas")
-#    return dados_agregados
-
-
-# ====================================================================
-# AGREGAR DESPESAS POR CONTA E MÊS (com soma de positivos e negativos)
-# ====================================================================
 def agregar_despesas_por_mes(df_movimentos):
     """
     Agrega despesas por CONTA e MÊS, somando valores positivos e negativos.
-    O valor final por conta/mês será sempre positivo (valor absoluto da soma).
-    # Filtra:
-    # - todas as DESPESAS
-    # - e também as RECEITAS da conta "Manutencao Cgd"
+    O valor final por conta/mês é o absoluto da soma.
+
+    Inclui:
+    - todas as linhas com TIPO = DESPESA
+    - e a conta "MANUTENCAO CGD" mesmo que o extracto bancário a tenha
+      classificado como RECEITA (é a comissão de manutenção da conta,
+      debitada pelo banco ao condomínio — é sempre DESPESA)
     """
 
     df_despesas = df_movimentos[
@@ -171,147 +45,103 @@ def agregar_despesas_por_mes(df_movimentos):
             df_movimentos['TIPO'].str.upper().str.strip() == 'DESPESA'
         ) |
         (
-            (df_movimentos['TIPO'].str.upper().str.strip() == 'RECEITA') &
             (df_movimentos['CONTA'].str.upper().str.strip() == 'MANUTENCAO CGD')
         )
     ].copy()
-    
-    print(f"DEBUG: {len(df_despesas)} despesas encontradas para processar")
+
+    print(f"  → {len(df_despesas)} despesas encontradas para processar")
     if df_despesas.empty:
         print("AVISO: Nenhuma despesa encontrada")
         return {}
-   
-    # Dicionário: {Conta: {mes: valor}}
+
     dados_agregados = defaultdict(lambda: defaultdict(float))
     contas_com_valor = set()
 
     for _, row in df_despesas.iterrows():
         if pd.isna(row['DATA']):
             continue
-            
+
         try:
             if isinstance(row['DATA'], datetime):
                 mes = row['DATA'].month
             else:
                 mes = pd.to_datetime(row['DATA']).month
-        except:
+        except Exception:
             continue
-            
+
         conta = str(row['CONTA']).strip()
-        if not conta or conta == '':
+        if not conta:
             continue
-            
-        valor = clean_numeric(row['VALOR']) if 'clean_numeric' in globals() else row['VALOR']
-        
-        # Soma com sinal (positivo e negativo)
+
+        valor = clean_numeric(row['VALOR'])
         dados_agregados[conta][mes] += valor
         contas_com_valor.add(conta)
 
-    # Torna todos os valores finais positivos (absoluto da soma)
     for conta in dados_agregados:
         for mes in dados_agregados[conta]:
             dados_agregados[conta][mes] = abs(dados_agregados[conta][mes])
 
-    print(f"DEBUG: Agregação concluída. {len(contas_com_valor)} contas com despesas")
+    print(f"  → Agregação concluída: {len(contas_com_valor)} contas com despesas")
     return dados_agregados
 
 
 # ====================================================================
 # GERAR TABELA DE DESPESAS
 # ====================================================================
-def gerar_tabela_despesas(dados_agregados, output_db_path):
+def gerar_tabela_despesas(dados_agregados, output_db_path=None, pasta=None):
     """
-    Gera tabela de despesas em SQLite.
+    Gera tabela de despesas em condominio.db via save_despesas_wide (SQL).
+
+    output_db_path: path legado (.../Despesas) — usado só para resolver a pasta.
+    pasta: pasta de dados explícita (preferida).
     """
-    
     if not dados_agregados:
         print("AVISO: Nenhum dado para gerar tabela de despesas")
         return
-    
-    contas_ordenadas = sorted(dados_agregados.keys())
-    print(f"DEBUG: Gerando tabela com {len(contas_ordenadas)} contas")
 
-    field_specs = (
-        'DESPESAS C(30); '
-        'JAN N(10,2); FEV N(10,2); MAR N(10,2); '
-        'ABR N(10,2); MAI N(10,2); JUN N(10,2); '
-        'JUL N(10,2); AGO N(10,2); SET N(10,2); '
-        'OUT N(10,2); NOV N(10,2); DEZ N(10,2); '
-        'TOTAL N(10,2)'
-    )
+    if pasta is not None:
+        pasta_res = resolver_pasta(pasta)
+    elif output_db_path is not None:
+        pasta_res = resolver_pasta(output_db_path)
+    else:
+        pasta_res = resolver_pasta(None)
+
+    contas_ordenadas = sorted(dados_agregados.keys())
+    print(f"  → Gerando tabela com {len(contas_ordenadas)} contas")
 
     rows = []
     totais_mensais = [0.0] * 12
-    
+
     for conta in contas_ordenadas:
         valores_mes = dados_agregados[conta]
-        jan = valores_mes.get(1, 0.0)
-        fev = valores_mes.get(2, 0.0)
-        mar = valores_mes.get(3, 0.0)
-        abr = valores_mes.get(4, 0.0)
-        mai = valores_mes.get(5, 0.0)
-        jun = valores_mes.get(6, 0.0)
-        jul = valores_mes.get(7, 0.0)
-        ago = valores_mes.get(8, 0.0)
-        set_val = valores_mes.get(9, 0.0)
-        out = valores_mes.get(10, 0.0)
-        nov = valores_mes.get(11, 0.0)
-        dez = valores_mes.get(12, 0.0)
-        total_anual = jan + fev + mar + abr + mai + jun + jul + ago + set_val + out + nov + dez
-        
-        totais_mensais[0] += jan
-        totais_mensais[1] += fev
-        totais_mensais[2] += mar
-        totais_mensais[3] += abr
-        totais_mensais[4] += mai
-        totais_mensais[5] += jun
-        totais_mensais[6] += jul
-        totais_mensais[7] += ago
-        totais_mensais[8] += set_val
-        totais_mensais[9] += out
-        totais_mensais[10] += nov
-        totais_mensais[11] += dez
-        
+        vals = [float(valores_mes.get(m, 0.0) or 0.0) for m in range(1, 13)]
+        total_anual = sum(vals)
+        for i, v in enumerate(vals):
+            totais_mensais[i] += v
         rows.append({
-            'DESPESAS': conta[:50],
-            'JAN': jan,
-            'FEV': fev,
-            'MAR': mar,
-            'ABR': abr,
-            'MAI': mai,
-            'JUN': jun,
-            'JUL': jul,
-            'AGO': ago,
-            'SET': set_val,
-            'OUT': out,
-            'NOV': nov,
-            'DEZ': dez,
-            'TOTAL': total_anual
+            "DESPESAS": conta[:50],
+            "JAN": vals[0], "FEV": vals[1], "MAR": vals[2],
+            "ABR": vals[3], "MAI": vals[4], "JUN": vals[5],
+            "JUL": vals[6], "AGO": vals[7], "SET": vals[8],
+            "OUT": vals[9], "NOV": vals[10], "DEZ": vals[11],
+            "TOTAL": total_anual,
         })
         print(f"  ✓ {conta}: Total anual = {total_anual:.2f}")
-    
+
     total_geral = sum(totais_mensais)
     rows.append({
-        'DESPESAS': 'TOTAIS',
-        'JAN': totais_mensais[0],
-        'FEV': totais_mensais[1],
-        'MAR': totais_mensais[2],
-        'ABR': totais_mensais[3],
-        'MAI': totais_mensais[4],
-        'JUN': totais_mensais[5],
-        'JUL': totais_mensais[6],
-        'AGO': totais_mensais[7],
-        'SET': totais_mensais[8],
-        'OUT': totais_mensais[9],
-        'NOV': totais_mensais[10],
-        'DEZ': totais_mensais[11],
-        'TOTAL': total_geral
+        "DESPESAS": "TOTAIS",
+        "JAN": totais_mensais[0], "FEV": totais_mensais[1], "MAR": totais_mensais[2],
+        "ABR": totais_mensais[3], "MAI": totais_mensais[4], "JUN": totais_mensais[5],
+        "JUL": totais_mensais[6], "AGO": totais_mensais[7], "SET": totais_mensais[8],
+        "OUT": totais_mensais[9], "NOV": totais_mensais[10], "DEZ": totais_mensais[11],
+        "TOTAL": total_geral,
     })
     print(f"\n  ✓ TOTAIS: {total_geral:.2f}")
 
     df = pd.DataFrame(rows, dtype=object)
-    ok = salvar_db(df, output_db_path, field_specs)
-    print(f"\nTabela de despesas gravada em {output_db_path}") if ok else print(f"\nFalha ao gravar {output_db_path}")
+    n = save_despesas_wide(df, pasta_res)
+    print(f"\nTabela de despesas gravada em {pasta_res} ({n} células/linhas via SQL)")
     print(f"Total de registos: {len(contas_ordenadas) + 1} (incluindo TOTAIS)")
 
 
@@ -319,47 +149,46 @@ def gerar_tabela_despesas(dados_agregados, output_db_path):
 # VISUALIZAÇÃO (PIVOT TABLE NO TERMINAL)
 # ====================================================================
 
-def exibir_pivot_table(despesas_db_path):
-    """
-    Exibe a tabela de despesas formatada como pivot table no terminal.
-    Leitura pela compatibilidade comum: `carregar_db` + DataFrame.
-    """
+def exibir_pivot_table(despesas_db_path=None, pasta=None):
+    """Exibe a tabela de despesas (load_despesas_wide)."""
     try:
-        rows, _ = carregar_db(despesas_db_path)
+        pasta_res = resolver_pasta(pasta if pasta is not None else despesas_db_path)
+        rows, _ = load_despesas_wide(pasta_res)
         df = pd.DataFrame(rows, dtype=object)
-        
+
         if df.empty:
             print("AVISO: Despesas está vazio")
             return
-        
-        print("\n" + "="*120)
+
+        print("\n" + "=" * 120)
         print("TABELA DE DESPESAS - PIVOT TABLE")
-        print("="*120)
-        
-        pd.set_option('display.max_columns', None)
-        pd.set_option('display.width', 120)
-        pd.set_option('display.float_format', '{:.2f}'.format)
-        
+        print("=" * 120)
+
+        pd.set_option("display.max_columns", None)
+        pd.set_option("display.width", 120)
+        pd.set_option("display.float_format", "{:.2f}".format)
+
         print(df.to_string(index=False))
-        
-        print("="*120)
-        
-        if 'TOTAL' in df.columns and len(df) > 1:
-            linha_totais = df[df['DESPESAS'].astype(str).str.strip().str.upper() == 'TOTAIS']
+        print("=" * 120)
+
+        if "TOTAL" in df.columns and len(df) > 1:
+            linha_totais = df[df["DESPESAS"].astype(str).str.strip().str.upper() == "TOTAIS"]
             if not linha_totais.empty:
-                total_geral = clean_numeric(linha_totais['TOTAL'].iloc[0])
+                total_geral = clean_numeric(linha_totais["TOTAL"].iloc[0])
                 print(f"\n>>> TOTAL GERAL DE DESPESAS: {total_geral:.2f} €")
-                
-                meses = ['JAN', 'FEV', 'MAR', 'ABR', 'MAI', 'JUN', 
-                        'JUL', 'AGO', 'SET', 'OUT', 'NOV', 'DEZ']
-                valores_mensais = [clean_numeric(linha_totais[mes].iloc[0]) for mes in meses if mes in linha_totais.columns]
+                meses = [
+                    "JAN", "FEV", "MAR", "ABR", "MAI", "JUN",
+                    "JUL", "AGO", "SET", "OUT", "NOV", "DEZ",
+                ]
+                valores_mensais = [
+                    clean_numeric(linha_totais[mes].iloc[0])
+                    for mes in meses if mes in linha_totais.columns
+                ]
                 if valores_mensais:
                     mes_max = meses[valores_mensais.index(max(valores_mensais))]
                     valor_max = max(valores_mensais)
                     print(f">>> MÊS COM MAIOR DESPESA: {mes_max} ({valor_max:.2f} €)")
-        
         print("\n")
-        
     except Exception as e:
         print(f"ERRO ao exibir pivot table: {e}")
 
@@ -373,7 +202,7 @@ def exportar_para_excel(despesas_db_path, output_excel_path='despesas_validacao.
     Exporta despesas para Excel para validação visual.
     """
     try:
-        rows, _ = carregar_db(despesas_db_path)
+        rows, _ = load_despesas_wide(resolver_pasta(despesas_db_path))
         df = pd.DataFrame(rows, dtype=object)
 
         if df.empty:
@@ -402,38 +231,42 @@ def exportar_para_excel(despesas_db_path, output_excel_path='despesas_validacao.
 def processar_despesas(bancos_db='Bancos',
                        caixa_db='Caixa',
                        despesas_db='Despesas',
-                       exportar_excel=False):
+                       exportar_excel=False,
+                       pasta=None):
     """
-    Processo principal que replica GerarTabelaDespesas() do VBA.
-    Usa movimentos aglutinados de Bancos + Caixa.
-    """
-    print("\n" + "="*80)
-    print("PROCESSAMENTO DE DESPESAS - Versão Python (COM AGLUTINAÇÃO)")
-    print("="*80 + "\n")
+    Processo principal de despesas.
 
-    # PASSO 1: Aglutinar movimentos
-    print("PASSO 1: Aglutinando movimentos de Bancos + Caixa...")
-    df_movimentos = aglutinar_movimentos(bancos_db, caixa_db)
+    Preferir ``pasta=``. Os argumentos ``bancos_db`` / ``caixa_db`` /
+    ``despesas_db`` são **legado de compatibilidade** (só para
+    ``resolver_pasta``); dados em ``condominio.db``.
+    """
+    print("\n" + "=" * 80)
+    print("PROCESSAMENTO DE DESPESAS (SQL / API canónica)")
+    print("=" * 80 + "\n")
+
+    if pasta is not None:
+        pasta_res = resolver_pasta(pasta)
+    else:
+        pasta_res = resolver_pasta(bancos_db)
+
+    print("PASSO 1: Aglutinando movimentos (bancos+caixa)...")
+    df_movimentos = aglutinar_movimentos(pasta=pasta_res)
     if df_movimentos.empty:
         print("ERRO: Não foi possível carregar movimentos")
         return
 
-    # PASSO 2: Agregar despesas
     print("\nPASSO 2: Agregando despesas por conta e mês...")
     dados_agregados = agregar_despesas_por_mes(df_movimentos)
     if not dados_agregados:
         print("AVISO: Nenhuma despesa para processar")
         return
 
-    # PASSO 3: Gerar tabela
     print("\nPASSO 3: Gerando tabela de despesas...")
-    gerar_tabela_despesas(dados_agregados, despesas_db)
+    gerar_tabela_despesas(dados_agregados, despesas_db, pasta=pasta_res)
 
-    # PASSO 4: Exibir resultado
     print("\nPASSO 4: Exibindo resultado...")
-    exibir_pivot_table(despesas_db)
+    exibir_pivot_table(despesas_db, pasta=pasta_res)
 
-    # PASSO 5 (Opcional): Exportar para Excel
     if exportar_excel:
         print("\nPASSO 5: Exportando para Excel (validação)...")
         exportar_para_excel(despesas_db)
@@ -465,7 +298,7 @@ def main(pasta_trabalho=None, exportar_excel=False):
     try:
         # BUGFIX (arquitetural): nomes simples confiavam no os.chdir()
         # acima, que deixou de ter efeito na resolução de caminhos do
-        # back-end SQLite (o bridge resolve nomes sem pasta sempre para a
+        # back-end SQLite (resolver_pasta resolve nomes sem pasta sempre para a
         # PASTA_CORRENTE global — ver nota em Balanco_Gui.py). Usar
         # caminhos completos a partir de pasta_trabalho corrige isso.
         processar_despesas(
