@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem, QFrame, QGridLayout, QGraphicsOpacityEffect, QFileDialog,
     QLineEdit, QFormLayout, QDialogButtonBox, QStyle,
 )
-from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QVariant, QSize, QEvent, QPoint, QPropertyAnimation, QSequentialAnimationGroup, QEasingCurve, pyqtSignal, QRect
+from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QVariant, QSize, QEvent, QPoint, QPropertyAnimation, QSequentialAnimationGroup, QEasingCurve, pyqtSignal, QRect, QTimer
 from PyQt6.QtGui import QColor, QBrush, QIcon, QPixmap, QCursor, QPen, QPainter
 
 # Constantes / utilitários
@@ -217,8 +217,17 @@ class NomeComAdminDelegate(QStyledItemDelegate):
             except (IndexError, AttributeError, KeyError, TypeError):
                 is_admin = False
 
+            # Verificar se o condómino está com quotas em atraso
+            is_selected = bool(option.state & QStyle.StateFlag.State_Selected)
+            em_atraso = False
+            try:
+                if hasattr(model, "esta_em_atraso"):
+                    em_atraso = model.esta_em_atraso(row)
+            except (IndexError, AttributeError, KeyError, TypeError):
+                em_atraso = False
+
             # Preencher fundo da célula
-            if option.state & QStyle.StateFlag.State_Selected:
+            if is_selected:
                 painter.fillRect(option.rect, option.palette.highlight())
             else:
                 fundo = index.data(Qt.ItemDataRole.BackgroundRole)
@@ -227,17 +236,27 @@ class NomeComAdminDelegate(QStyledItemDelegate):
             # Obter o texto do nome
             nome = str(model.data(index, Qt.ItemDataRole.DisplayRole))
             
-            # Configurar a cor do texto (azul para nomes)
-            if option.state & QStyle.StateFlag.State_Selected:
+            # Configurar a cor do texto:
+            # - selecionado: cor de destaque normal (sem piscar, para não conflituar
+            #   com o realce azul da seleção)
+            # - em atraso: vermelho
+            # - normal: azul
+            if is_selected:
                 painter.setPen(option.palette.highlightedText().color())
+            elif em_atraso:
+                painter.setPen(QColor("#d32f2f"))
             else:
                 painter.setPen(QColor("#1976d2"))
             
             # Calcular espaço disponível para o texto
             text_rect = option.rect.adjusted(5, 0, -40 if (is_admin and self.admin_pixmap) else -5, 0)
             
-            # Desenhar o texto do nome
-            painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, nome)
+            # Desenhar o texto do nome — exceto no "tick" de piscar em que o nome
+            # fica temporariamente oculto (efeito de intermitência), quando em atraso
+            # e a linha não está selecionada.
+            blink_visible = getattr(model, "_blink_visible", True)
+            if not (em_atraso and not is_selected and not blink_visible):
+                painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, nome)
             
             # Se for admin e tiver ícone, desenhar no lado direito
             if is_admin and self.admin_pixmap and not self.admin_pixmap.isNull():
@@ -727,7 +746,8 @@ class PagamentosQuotasDialog(QDialog):
         # mês corrente do calendário. Ajustar aqui se o condomínio usar um
         # ano de quotas com início diferente.
         estado = calcular_estado_atraso(
-            self.dados['total_geral'], self.quota_normal, self.quota_extra
+            self.dados['total_geral'], self.quota_normal, self.quota_extra,
+            divida_anterior=self.dados.get('divida_anterior_liquidada', 0.0),
         )
         em_atraso = estado["em_atraso"]
 
@@ -1119,6 +1139,12 @@ class CondominosTableModel(QAbstractTableModel):
         # Identidades das linhas alteradas desde a última gravação.
         # Usar id(dict) mantém o destaque correto mesmo após ordenar a tabela.
         self._dirty_row_ids = set()
+        # Identidades (id(dict)) dos condóminos com quotas em atraso — alimentado
+        # por CondominosWidget.calcular_e_aplicar_atrasos(). Usar id(dict) mantém
+        # a marcação correta mesmo após ordenar a tabela.
+        self._atraso_row_ids = set()
+        # Estado do "piscar" do nome (alternado por CondominosWidget via QTimer).
+        self._blink_visible = True
         # Colunas visíveis. CC é só UI (botão); dados em CC_NUMERO/CC_VALIDADE/NIF no dict.
         self._fields = ['NOME', 'TELEMOVEL', 'CHECK', 'EMAIL', 'FRACAO', 'ANDAR',
                         'PERMILAGEM', 'QUOTAN', 'QUOTAE', 'CC', 'FOTO']
@@ -1304,7 +1330,35 @@ class CondominosTableModel(QAbstractTableModel):
             if n:
                 print(f"✓ Reconciliados {n} condómino(s) com a tabela fracoes")
         self._dirty_row_ids.clear()
+        # Os dicts são recriados a cada load — os ids antigos ficam obsoletos.
+        # CondominosWidget.carregar_tabela() recalcula o atraso logo a seguir.
+        self._atraso_row_ids.clear()
         self.endResetModel()
+
+    def set_atraso(self, atraso_ids):
+        """Define o conjunto de condóminos (id(dict)) com quotas em atraso e
+        repinta a coluna Nome para refletir a cor/piscar."""
+        self._atraso_row_ids = set(atraso_ids or ())
+        if self.rowCount() > 0:
+            self.dataChanged.emit(
+                self.index(0, 0), self.index(self.rowCount() - 1, 0),
+                [Qt.ItemDataRole.DisplayRole],
+            )
+
+    def esta_em_atraso(self, row):
+        """Indica se o condómino na linha `row` tem quotas em atraso."""
+        if row < 0 or row >= len(self._data):
+            return False
+        return id(self._data[row]) in self._atraso_row_ids
+
+    def toggle_blink(self):
+        """Alterna a visibilidade do nome dos condóminos em atraso (efeito piscar)."""
+        self._blink_visible = not self._blink_visible
+        if self._atraso_row_ids and self.rowCount() > 0:
+            self.dataChanged.emit(
+                self.index(0, 0), self.index(self.rowCount() - 1, 0),
+                [Qt.ItemDataRole.DisplayRole],
+            )
 
     # Colunas pelas quais é permitido ordenar ao clicar no cabeçalho.
     COLUNAS_ORDENAVEIS = (4, 6)  # FRACAO, PERMILAGEM
@@ -1536,6 +1590,12 @@ class CondominosWidget(QWidget):
         cc_delegate = CCButtonDelegate(self.table_view)
         self.table_view.setItemDelegateForColumn(9, cc_delegate)
 
+        # Timer a piscar o nome dos condóminos com quotas em atraso (a cada 500ms)
+        self._blink_timer = QTimer(self)
+        self._blink_timer.setInterval(500)
+        self._blink_timer.timeout.connect(self._piscar_atrasados)
+        self._blink_timer.start()
+
         # Mouse tracking
         self.table_view.setMouseTracking(True)
         self.table_view.viewport().setMouseTracking(True)
@@ -1664,6 +1724,61 @@ class CondominosWidget(QWidget):
         if self.caminho_condominos_db:
             self.model.load_from_db(str(self.caminho_condominos_db))
             self.status_bar.showMessage(f"✅ {self.model.rowCount()} Condóminos carregados")
+            self.calcular_e_aplicar_atrasos()
+
+    def _piscar_atrasados(self):
+        """Alterna a intermitência do nome dos condóminos em atraso (chamado pelo QTimer)."""
+        if hasattr(self, "model"):
+            self.model.toggle_blink()
+
+    def calcular_e_aplicar_atrasos(self):
+        """Calcula, por ANDAR, quais condóminos têm quotas em atraso e marca-os
+        no modelo para o nome aparecer a vermelho a piscar na grelha.
+
+        Só calcula no exercício corrente: o critério de `calcular_estado_atraso`
+        compara com o mês corrente do calendário, pelo que não se aplica da
+        mesma forma a pastas de histórico (ver também `_atualizar_estado_whatsapp`).
+        """
+        if not hasattr(self, "model"):
+            return
+        if not self.pasta_dados or not pasta_e_corrente(self.pasta_dados):
+            self.model.set_atraso(set())
+            return
+
+        atraso_ids = set()
+        cache_total_por_andar = {}  # evita repetir obter_pagamentos_condomino por ANDAR
+
+        for row_dict in self.model._data:
+            andar = str(row_dict.get('ANDAR', '') or '').strip()
+            nome = str(row_dict.get('NOME', '') or '').strip()
+            if not andar or not nome:
+                continue
+            if nome.startswith('[') and nome.endswith(']'):
+                continue  # condómino inativo
+
+            try:
+                if andar in cache_total_por_andar:
+                    total_pago, divida_liq = cache_total_por_andar[andar]
+                else:
+                    dados = obter_pagamentos_condomino(andar, self.pasta_dados)
+                    total_pago = dados.get('total_geral', 0.0)
+                    divida_liq = dados.get('divida_anterior_liquidada', 0.0)
+                    cache_total_por_andar[andar] = (total_pago, divida_liq)
+
+                quota_normal = clean_numeric(row_dict.get('QUOTAN', 0))
+                quota_extra = clean_numeric(row_dict.get('QUOTAE', 0))
+                estado = calcular_estado_atraso(
+                    total_pago, quota_normal, quota_extra,
+                    divida_anterior=divida_liq,
+                )
+                if estado.get('em_atraso'):
+                    atraso_ids.add(id(row_dict))
+            except Exception as e:
+                # Um condómino com dados incompletos não pode bloquear a grelha inteira.
+                print(f"⚠ Não foi possível calcular o atraso de {nome}: {e}")
+                continue
+
+        self.model.set_atraso(atraso_ids)
     
     def adicionar_registo(self):
         """Adiciona um condómino novo, se ainda existir fração livre.
@@ -1691,7 +1806,7 @@ class CondominosWidget(QWidget):
                 "Não é possível adicionar um novo condómino:</p><br>"
                 "Todas as frações ["f"{lista}] definidas na tabela de frações já estão "
                 "atribuídas a condóminos.<br><br>"
-                "Liberta uma fração (apagar/alterar o condómino correspondente) "
+                "Liberte uma fração (apagar/alterar o condómino correspondente) "
                 "ou acrescenta frações em Configurações antes de continuar.",
             )
             return
@@ -1850,9 +1965,8 @@ class CondominosWidget(QWidget):
             return
 
         reply = QMessageBox.question(
-            self,
-            "Confirmar Impressão em Lote",
-            "Deseja gerar os recibos anuais para TODOS os condóminos ativos?\n\n"
+            self, "Confirmar Impressão em Lote",
+            "<br><b>Deseja gerar os recibos anuais para TODOS os condóminos ativos?</b><br><br>"
             "Será criado um PDF por condómino na pasta docs/.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No

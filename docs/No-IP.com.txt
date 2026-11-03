@@ -1,0 +1,13 @@
+Acesso a https://my.noip.com/:
+
+Username: GMAIL 42condominio@gmail.com
+Password: AvStoAntonio42!
+- Pergunta segurança: Qual é o nome do meio do seu pai?
+- resposta: paiva
+
+para configurar o DUC:
+username: ggyfr5e
+password: JUkezZBScviU
+hostnames: condo42.ddns.net
+service_name: noip-duc
+binaries_local_dir: ./noip-duc_3.3.0/binaries

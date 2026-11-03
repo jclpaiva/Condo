@@ -75,6 +75,7 @@ FONTS_DIR = BASE_DIR / "fonts"
 PASTA_CORRENTE = BASE_DIR / "corrente"
 PASTA_HISTORICO = BASE_DIR / "historico"
 EXPORT_DIR = BASE_DIR / "export"
+TEMPLATES_DIR = BASE_DIR / "templates"
 DB_NAME = "condominio.db"
 DB_EXPORT_NAME = "condo42.db"
 

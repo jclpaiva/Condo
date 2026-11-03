@@ -1,0 +1,52 @@
+noip-duc:
+  username: ggyfr5e
+  password: JUkezZBScviU
+  hostnames: condo42.ddns.net
+  service_name: noip-duc
+  binaries_local_dir: ./noip-duc_3.3.0/binaries
+  version: 3.3.0
+
++++++
+
+GMAIL 42condominio@gmail.com
+Password: AvStoAntonio42!
+
+Password da app.gmail: ajmk cfdd zckh cqal
+
+#importaçoes
+import smtplib
+from email.message import EmailMessage
+import mimetypes
+
+remetente = '42condominio@gmail.com'
+destinatario = ''jclpaiva@gmail.com'
+assunto = 'Relatorio do condominio'
+mensagem = """
+Ola, qui esta o relatorio do condominio.
+Obrigado
+"""
+
+senha = 'ajmk cfdd zckh cqal'
+anexo = 'docs/Relatorio_Condominio.pdf'
+
+# Criar o email
+anexar arquivo = EmailMessage()
+msg['From'] = remetente
+msg['To'] = destinatario
+msg['Subject'] = assunto
+msg.set.content(mensagem)
+
+# Anexar o arquivo
+mime_type, '_' = mimetypes.guess_type(anexo)
+mime_type, mime_subtype = mime_type.splite('/')
+
+with open(anexo,'rb') as arquivo:
+    msg.add_attachment(arquivo.read()maintype=mime_type,subtyoe=mime_subtype
+	filename=anexo)
+
+# Realizar o envio do email
+with smtplib.SMTP_SSL("smtp.gmail.com,465") as email:
+    email.login(remetente,senha)
+	email.send.message(msg)
+
+print('Email foi enviado com sucesso!')

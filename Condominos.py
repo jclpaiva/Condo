@@ -342,6 +342,51 @@ atualizar_quotas_configs = atualizar_quotas_regras
 # FUNÇÕES DE PROCESSAMENTO DE PAGAMENTOS
 # ====================================================================
 
+def _divida_anterior_por_andar(pasta, andar: str) -> float:
+    """Dívida transitada de anos anteriores (SALDO_ANT < 0) para um ANDAR.
+
+    Soma Quotas normais + extra. Só lê (receitas_resumo via load_receitas_wide);
+    saldos positivos (crédito) ou falhas de leitura contam como 0.
+    """
+    try:
+        from Database import load_receitas_wide
+    except Exception:
+        return 0.0
+    alvo = str(andar or "").strip().lower()
+    total = 0.0
+    for tipo in ("NORMAL", "EXTRA"):
+        try:
+            rows, _ = load_receitas_wide(tipo, pasta)
+        except Exception:
+            continue
+        for r in rows:
+            if str(r.get("FRACCAO", "")).strip().lower() == alvo:
+                sa = float(r.get("SALDO_ANT") or 0)
+                if sa < -0.005:
+                    total += -sa
+                break
+    return round(total, 2)
+
+
+def _divida_anterior_liquidada(dados_mensais, quota_mensal: float,
+                               divida_anterior: float) -> float:
+    """Parte da dívida antiga que foi paga ESTE ano (e não é quota de 2026).
+
+    Os pagamentos de dívida antiga entram no mapa do mês em que foram feitos
+    (ex.: Jan = 28 + 336). Contam como liquidação o excedente de cada mês
+    sobre a quota mensal, limitado à dívida existente. Sem dívida anterior
+    devolve 0 (pré-pagamentos de quotas correntes não são tocados) e, se a
+    dívida antiga NÃO foi paga, também 0: nunca gera atraso em 2026.
+    """
+    if divida_anterior <= 0.005 or quota_mensal <= 0.005:
+        return 0.0
+    excedente = sum(
+        max(0.0, float(m.get("total", 0) or 0) - quota_mensal)
+        for m in dados_mensais
+    )
+    return round(min(divida_anterior, excedente), 2)
+
+
 def obter_pagamentos_condomino(andar, pasta_dados):
     """
     Processa receitas e filtra para o condómino específico.
@@ -423,12 +468,24 @@ def obter_pagamentos_condomino(andar, pasta_dados):
         total_normal += valor_normal
         total_extra += valor_extra
     
-    # 6. Retornar estrutura completa
+    # 6. Dívida de anos anteriores já liquidada este ano (só para o cálculo
+    #    de atraso; as chaves existentes não mudam)
+    try:
+        q = tabela_quotas.get(fracao_normalizada, {})
+        quota_mensal = float(q.get('QUOTA_NORMAL') or 0) + float(q.get('QUOTA_EXTRA') or 0)
+        divida_ant = _divida_anterior_por_andar(pasta, fracao_normalizada)
+        divida_liq = _divida_anterior_liquidada(dados_mensais, quota_mensal, divida_ant)
+    except Exception:
+        divida_ant = divida_liq = 0.0
+
+    # 7. Retornar estrutura completa
     return {
         'dados_mensais': dados_mensais,
         'total_normal': total_normal,
         'total_extra': total_extra,
-        'total_geral': total_normal + total_extra
+        'total_geral': total_normal + total_extra,
+        'divida_anterior': divida_ant,
+        'divida_anterior_liquidada': divida_liq,
     }
 
 
@@ -881,48 +938,62 @@ def definir_administrador(pasta_dados, nome_administrador):
 # ====================================================================
 # CÁLCULO DE ATRASO DE QUOTAS (reutilizável por GUI e WhatsApp)
 # ====================================================================
+DIA_LIMITE_PAGAMENTO = 8  # último dia para pagar sem ficar em atraso
+
+
+def meses_vencidos_corrente(hoje=None, dia_limite: int = DIA_LIMITE_PAGAMENTO) -> int:
+    """Nº de quotas mensais JÁ VENCIDAS no ano corrente.
+
+    A quota de cada mês pode ser paga até ao dia ``dia_limite`` (8). A partir
+    do dia seguinte (dia 9, inclusive) o mês não pago passa a estar em atraso.
+
+      - dia <= 8 : vencidos = mês corrente - 1  (ex.: 2 Nov -> 10)
+      - dia >= 9 : vencidos = mês corrente      (ex.: 9 Nov -> 11)
+
+    Nunca passa de 12, pelo que Nov/Dez só contam a partir do dia 9 desses meses.
+    """
+    from datetime import datetime
+    hoje = hoje or datetime.now()
+    meses = hoje.month if hoje.day > dia_limite else hoje.month - 1
+    return max(0, min(12, meses))
+
+
 def calcular_estado_atraso(total_pago: float, quota_normal: float,
                             quota_extra: float,
-                            meses_decorridos: "Optional[int]" = None) -> dict:
-    """Calcula o estado de atraso de um condómino.
+                            meses_decorridos: "Optional[int]" = None,
+                            divida_anterior: float = 0.0) -> dict:
+    """Calcula o estado de atraso de um condómino (apenas ano corrente).
 
-    Critério (igual ao do diálogo de pagamentos):
-      - Esperado até hoje = (quota_normal + quota_extra) × meses_decorridos
-      - Déficit = esperado − total_pago
-      - Em atraso se déficit > 0,01 € e quota mensal > 0
+    Critério:
+      - Esperado = (quota_normal + quota_extra) × meses VENCIDOS do ano
+        (por omissão: mês corrente - 1; Nov/Dez nunca contam antes de tempo)
+      - Pago do ano = total_pago − divida_anterior
+        (``divida_anterior`` = valor de anos anteriores liquidado este ano,
+        i.e. max(0, −SALDO_ANT); não deve contar como pagamento de 2026)
+      - Em atraso se esperado − pago do ano > 0,01 € e quota mensal > 0
 
-    Args:
-        meses_decorridos: nº de meses a considerar como "já vencidos".
-            Por omissão usa o mês corrente do calendário (datetime.now().month),
-            o que assume que a pasta de dados analisada corresponde ao ANO
-            CORRENTE. Ao analisar/enviar cobranças para uma pasta de um ano
-            histórico (ex.: "historico/2024"), o chamador deve calcular e
-            passar aqui o nº de meses correto para esse ano (12, se já
-            encerrado), para não comparar com o mês atual do calendário.
-
-    Devolve dict com:
-        em_atraso    : bool
-        meses_atraso : int
-        deficit      : float
-        status_msg   : str (ex.: "2 quotas em atraso (128,00 €)" ou "Em Dia")
-        status_color : str (cor hex)
+    O SALDO_ANT / SALDO é só controlo contabilístico: nunca decide atraso;
+    apenas é usado para retirar do total pago o que foi dívida antiga.
     """
     import math
-    from datetime import datetime
     from Commons import format_currency
 
     try:
         qn = float(quota_normal or 0)
         qe = float(quota_extra or 0)
         tp = float(total_pago or 0)
+        da = max(0.0, float(divida_anterior or 0))
     except (TypeError, ValueError):
-        qn = qe = tp = 0.0
+        qn = qe = tp = da = 0.0
 
     if meses_decorridos is None:
-        meses_decorridos = datetime.now().month
+        meses_decorridos = meses_vencidos_corrente()
+    meses_decorridos = max(0, min(12, int(meses_decorridos)))
+
     quota_mensal = qn + qe
+    pago_ano = tp - da
     esperado_ate_hoje = quota_mensal * meses_decorridos
-    deficit = esperado_ate_hoje - tp
+    deficit = esperado_ate_hoje - pago_ano
 
     em_atraso = deficit > 0.01 and quota_mensal > 0
     if em_atraso:
@@ -935,6 +1006,7 @@ def calcular_estado_atraso(total_pago: float, quota_normal: float,
         status_color = "#dc3545"
     else:
         meses_atraso = 0
+        deficit = max(deficit, 0.0)
         status_msg = "Em Dia"
         status_color = "#28a745"
 

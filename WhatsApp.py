@@ -143,7 +143,10 @@ def enviar_whatsapp_a_condomino(condomino: dict, dados_pagamentos: dict) -> tupl
     quota_e = float(condomino.get("QUOTAE") or 0)
     total_pago = float(dados_pagamentos.get("total_geral") or 0)
 
-    estado = calcular_estado_atraso(total_pago, quota_n, quota_e)
+    estado = calcular_estado_atraso(
+        total_pago, quota_n, quota_e,
+        divida_anterior=float(dados_pagamentos.get("divida_anterior_liquidada") or 0),
+    )
     if not estado["em_atraso"]:
         return False, f"{nome}: sem quotas em atraso"
 

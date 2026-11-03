@@ -33,6 +33,7 @@ from Commons import (
     BASE_DIR,
     DOCS_DIR,
     ICONS_DIR,
+    TEMPLATES_DIR,
     obter_ano_exercicio,
 )
 from Database import (
@@ -42,7 +43,6 @@ from Database import (
     configs as configs_repo,
 )
 
-TEMPLATES_DIR = BASE_DIR / "templates"
 TEMPLATE_PATH = TEMPLATES_DIR / "ATA_template.docx"
 
 MESES_PT = {
@@ -351,7 +351,7 @@ def _inserir_lista_presencas(doc: Document) -> None:
     No parágrafo «Lista de Presenças» (fim da ata):
     mantém o título e insere icons/Lista_presenças.png (15 cm × 7 cm).
     """
-    img_path = TEMPLATES_DIR / "Lista_presenças.png"
+    lista_path = TEMPLATES_DIR / "Lista_presenças.png"
     alvo = None
     for p in doc.paragraphs:
         if "Lista de Presenças" in "".join(r.text for r in p.runs):
@@ -361,8 +361,8 @@ def _inserir_lista_presencas(doc: Document) -> None:
         print("  ⚠️ Parágrafo 'Lista de Presenças' não encontrado no template.")
         return
 
-    if not img_path.is_file():
-        print(f"  ⚠️ Lista de presenças não encontrada: {img_path}")
+    if not lista_path.is_file():
+        print(f"  ⚠️ Lista de presenças não encontrada: {lista_path}")
         return
 
     try:
@@ -373,8 +373,8 @@ def _inserir_lista_presencas(doc: Document) -> None:
         # Mover o parágrafo novo para logo a seguir a «alvo»
         alvo._p.addnext(novo._p)
         run = novo.add_run()
-        run.add_picture(str(img_path), width=Cm(15), height=Cm(7))
-        print(f"  ✓ Lista de presenças inserida: {img_path.name}")
+        run.add_picture(str(lista_path), width=Cm(15), height=Cm(7))
+        print(f"  ✓ Lista de presenças inserida: {lista_path.name}")
     except Exception as e:
         print(f"  ⚠️ Erro ao inserir lista de presenças: {e}")
 
