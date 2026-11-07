@@ -3,7 +3,7 @@ Configuracoes_Gui.py - Widget de configurações (Configs, Regras, Frações e A
 
 - Abas: Analisar CSV | Frações | Configs | Regras
 - Regras: CRUD via RegrasRepo (SQL)
-- Frações: CRUD via FracoesRepo (SQL) — Fração, Andar, Permilagem
+- Frações: CRUD via FracoesRepo — Fração, Andar, Permilagem, Quota N, Quota E
 - Contas (tabela DBF) eliminada na V5 — contas vêm de regras
 - Botão Gravar (azul): grava Configs, Frações e Regras
 """
@@ -163,13 +163,15 @@ class ConfigsTableModel(QAbstractTableModel):
 # Model + Delegates para a aba Regras
 # ──────────────────────────────────────────────────────────────────────────────
 
-_REGRAS_HEADERS  = ["Prioridade", "Classe", "Conta", "Pattern", "Normal", "Extra"]
+# Coluna "Valor" = legado regras.normal (UI cosmética).
+# regras.extra mantém-se na BD mas não é mostrado.
+# Regras de QUOTA: Valor vazio na grelha (montantes vêm de fracoes).
+_REGRAS_HEADERS  = ["Prioridade", "Classe", "Conta", "Pattern", "Valor"]
 _COL_PRIO   = 0
 _COL_CLASSE = 1
 _COL_CONTA  = 2
 _COL_PAT    = 3
-_COL_NORMAL = 4
-_COL_EXTRA  = 5
+_COL_VALOR  = 4
 
 _CLASSE_OPCOES = ["RECEITA", "DESPESA"]
 
@@ -205,15 +207,24 @@ class RegrasTableModel(QAbstractTableModel):
             return QVariant()
         row = self._rows[index.row()]
         col = index.column()
-        key = _REGRAS_HEADERS[col]
+        if col == _COL_VALOR:
+            key = "Normal"
+        else:
+            key = _REGRAS_HEADERS[col]
         val = row.get(key, "")
 
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
+            if col == _COL_VALOR:
+                # Regras de quota: não mostrar montantes (fonte = fracoes)
+                conta = str(row.get("Conta") or "").strip().upper()
+                classe = str(row.get("Classe") or "").strip().upper()
+                if classe == "RECEITA" and conta.startswith("QUOTA"):
+                    return "" if role == Qt.ItemDataRole.DisplayRole else QVariant()
             if val is None:
                 return "" if role == Qt.ItemDataRole.DisplayRole else QVariant()
             return str(val) if col != _COL_PRIO else int(val)
         if role == Qt.ItemDataRole.TextAlignmentRole:
-            if col in (_COL_PRIO, _COL_NORMAL, _COL_EXTRA):
+            if col in (_COL_PRIO, _COL_VALOR):
                 return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
             return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         if role == Qt.ItemDataRole.BackgroundRole:
@@ -226,8 +237,8 @@ class RegrasTableModel(QAbstractTableModel):
         base = (Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
         if not index.isValid():
             return Qt.ItemFlag.NoItemFlags
-        # Normal/Extra de regras de QUOTA vêm de Condóminos — só leitura
-        if index.column() in (_COL_NORMAL, _COL_EXTRA):
+        # Valor em regras de QUOTA: só leitura (montantes em fracoes)
+        if index.column() == _COL_VALOR:
             row = self._rows[index.row()]
             conta = str(row.get("Conta") or "").strip().upper()
             classe = str(row.get("Classe") or "").strip().upper()
@@ -239,7 +250,8 @@ class RegrasTableModel(QAbstractTableModel):
         if not index.isValid() or role != Qt.ItemDataRole.EditRole:
             return False
         row = self._rows[index.row()]
-        key = _REGRAS_HEADERS[index.column()]
+        col = index.column()
+        key = "Normal" if col == _COL_VALOR else _REGRAS_HEADERS[col]
         row[key] = value
         self._dirty = True
         self.dataChanged.emit(index, index)
@@ -420,18 +432,19 @@ class _PrioDelegate(QStyledItemDelegate):
 # Model + Delegate para a aba Frações
 # ──────────────────────────────────────────────────────────────────────────────
 
-_FRACOES_HEADERS = ["Fração", "Andar", "Permilagem", ""]
+_FRACOES_HEADERS = ["Fração", "Andar", "Permilagem", "Quota N", "Quota E", ""]
 _COL_FRACAO = 0
 _COL_ANDAR  = 1
 _COL_PERM   = 2
-_COL_FILL   = 3  # placeholder: preenche o espaço à direita (linhas a largura total)
+_COL_QN     = 3
+_COL_QE     = 4
+_COL_FILL   = 5  # placeholder: preenche o espaço à direita
 
 
 class FracoesTableModel(QAbstractTableModel):
     """
-    Model em memória para a tabela `fracoes` (fracao, andar, permilagem).
-    Cada linha é um dict com as chaves dos headers.
-    '_id' guarda o id da DB (None = linha nova ainda não gravada).
+    Model em memória para a tabela `fracoes`
+    (fracao, andar, permilagem, quota_normal, quota_extra).
     """
 
     def __init__(self):
@@ -457,14 +470,17 @@ class FracoesTableModel(QAbstractTableModel):
             return QVariant()
         row = self._rows[index.row()]
         col = index.column()
-        val = row.get(_FRACOES_HEADERS[col], "")
+        key = _FRACOES_HEADERS[col]
+        val = row.get(key, "")
 
         if role == Qt.ItemDataRole.DisplayRole:
             if col == _COL_PERM:
                 return f"{float(val or 0):.3f}"
+            if col in (_COL_QN, _COL_QE):
+                return f"{float(val or 0):.2f}"
             return "" if val is None else str(val)
         if role == Qt.ItemDataRole.EditRole:
-            if col == _COL_PERM:
+            if col in (_COL_PERM, _COL_QN, _COL_QE):
                 return float(val or 0)
             return "" if val is None else str(val)
         if role == Qt.ItemDataRole.TextAlignmentRole:
@@ -479,7 +495,7 @@ class FracoesTableModel(QAbstractTableModel):
             return Qt.ItemFlag.NoItemFlags
         base = (Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
         if index.column() == _COL_FILL:
-            return base  # placeholder: não editável
+            return base
         return base | Qt.ItemFlag.ItemIsEditable
 
     def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
@@ -503,16 +519,22 @@ class FracoesTableModel(QAbstractTableModel):
         return True
 
     def load(self, pasta: Path):
-        """Carrega as frações da BD (ordenadas por fração)."""
+        """Carrega as frações da BD (ordenadas por fração), com quotas."""
         self.beginResetModel()
         self._rows = []
         try:
             for r in FracoesRepo(pasta).all_ordered():
+                keys = r.keys() if hasattr(r, "keys") else []
+                qn = float(r["quota_normal"] or 0) if "quota_normal" in keys else 0.0
+                qe = float(r["quota_extra"] or 0) if "quota_extra" in keys else 0.0
                 self._rows.append({
                     "_id":        r["id"],
                     "Fração":     str(r["fracao"] or "").strip(),
                     "Andar":      str(r["andar"] or "").strip(),
                     "Permilagem": float(r["permilagem"] or 0.0),
+                    "Quota N":    qn,
+                    "Quota E":    qe,
+                    "":           "",
                 })
         except Exception as e:
             print(f"❌ FracoesTableModel.load() erro: {e}")
@@ -520,7 +542,10 @@ class FracoesTableModel(QAbstractTableModel):
         self.endResetModel()
 
     def add_row(self) -> int:
-        new = {"_id": None, "Fração": "", "Andar": "", "Permilagem": 0.0, "": ""}
+        new = {
+            "_id": None, "Fração": "", "Andar": "", "Permilagem": 0.0,
+            "Quota N": 0.0, "Quota E": 0.0, "": "",
+        }
         self.beginInsertRows(QModelIndex(), len(self._rows), len(self._rows))
         self._rows.append(new)
         self.endInsertRows()
@@ -536,9 +561,8 @@ class FracoesTableModel(QAbstractTableModel):
 
     def save(self, pasta: Path) -> tuple[int, int, list[str]]:
         """
-        Substitui TODAS as frações pelo conteúdo da grelha (FracoesRepo.replace_all).
-        Linhas sem Fração/Andar ou com Fração repetida são ignoradas (com aviso).
-        Devolve (gravadas, n_erros, mensagens_erro).
+        Substitui TODAS as frações pelo conteúdo da grelha (FracoesRepo.replace_all),
+        incluindo quota_normal / quota_extra.
         """
         erros: list[str] = []
         validas: list[dict] = []
@@ -556,8 +580,21 @@ class FracoesTableModel(QAbstractTableModel):
                 erros.append(f"Linha {i+1}: Fração '{fracao}' repetida — ignorada")
                 continue
             vistas.add(fracao)
-            validas.append({"fracao": fracao, "andar": andar,
-                            "permilagem": float(row.get("Permilagem") or 0.0)})
+            try:
+                qn = float(row.get("Quota N") or 0)
+            except (TypeError, ValueError):
+                qn = 0.0
+            try:
+                qe = float(row.get("Quota E") or 0)
+            except (TypeError, ValueError):
+                qe = 0.0
+            validas.append({
+                "fracao": fracao,
+                "andar": andar,
+                "permilagem": float(row.get("Permilagem") or 0.0),
+                "quota_normal": qn,
+                "quota_extra": qe,
+            })
         gravadas = 0
         try:
             gravadas = FracoesRepo(pasta).replace_all(validas)
@@ -592,7 +629,31 @@ class _PermilagemDelegate(QStyledItemDelegate):
         editor.setGeometry(option.rect)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+class _QuotaDelegate(QStyledItemDelegate):
+    """QDoubleSpinBox monetário para Quota N / Quota E."""
+
+    def createEditor(self, parent, option, index):
+        sb = QDoubleSpinBox(parent)
+        sb.setRange(0.0, 99999.0)
+        sb.setDecimals(2)
+        sb.setSingleStep(0.50)
+        sb.setPrefix("€ ")
+        return sb
+
+    def setEditorData(self, editor, index):
+        try:
+            editor.setValue(float(index.data(Qt.ItemDataRole.EditRole) or 0))
+        except (ValueError, TypeError):
+            editor.setValue(0.0)
+
+    def setModelData(self, editor, model, index):
+        editor.interpretText()
+        model.setData(index, editor.value(), Qt.ItemDataRole.EditRole)
+
+    def updateEditorGeometry(self, editor, option, index):
+        editor.setGeometry(option.rect)
+
+
 class ConfiguracoesWidget(QWidget):
     def __init__(self, pasta_dados=None, parent=None):
         super().__init__(parent)
@@ -649,7 +710,7 @@ class ConfiguracoesWidget(QWidget):
         self.tabs.addTab(self.tab_fracoes, "Frações")
         self.model_fracoes = FracoesTableModel()
         self._setup_fracoes_tab()
-        
+
         # Aba Regras
         self.tab_regras = QWidget()
         self.tabs.addTab(self.tab_regras, "Regras")
@@ -844,15 +905,23 @@ class ConfiguracoesWidget(QWidget):
         """)
         self.table_fracoes.setItemDelegateForColumn(
             _COL_PERM, _PermilagemDelegate(self.table_fracoes))
+        self.table_fracoes.setItemDelegateForColumn(
+            _COL_QN, _QuotaDelegate(self.table_fracoes))
+        self.table_fracoes.setItemDelegateForColumn(
+            _COL_QE, _QuotaDelegate(self.table_fracoes))
 
         hdr = self.table_fracoes.horizontalHeader()
         hdr.setStretchLastSection(False)
         hdr.setSectionResizeMode(_COL_FRACAO, QHeaderView.ResizeMode.Fixed)
-        hdr.resizeSection(_COL_FRACAO, 110)
+        hdr.resizeSection(_COL_FRACAO, 90)
         hdr.setSectionResizeMode(_COL_ANDAR, QHeaderView.ResizeMode.Fixed)
-        hdr.resizeSection(_COL_ANDAR, 130)
+        hdr.resizeSection(_COL_ANDAR, 120)
         hdr.setSectionResizeMode(_COL_PERM, QHeaderView.ResizeMode.Fixed)
-        hdr.resizeSection(_COL_PERM, 130)
+        hdr.resizeSection(_COL_PERM, 100)
+        hdr.setSectionResizeMode(_COL_QN, QHeaderView.ResizeMode.Fixed)
+        hdr.resizeSection(_COL_QN, 100)
+        hdr.setSectionResizeMode(_COL_QE, QHeaderView.ResizeMode.Fixed)
+        hdr.resizeSection(_COL_QE, 100)
         hdr.setSectionResizeMode(_COL_FILL, QHeaderView.ResizeMode.Stretch)
         self.table_fracoes.keyPressEvent = self._fracoes_key_press
         layout.addWidget(self.table_fracoes)
@@ -894,6 +963,8 @@ class ConfiguracoesWidget(QWidget):
             self.model_fracoes.remove_row(row)
 
     # ── Aba Regras ─────────────────────────────────────────────────────────────
+
+
 
     def _setup_regras_tab(self):
         layout = QVBoxLayout(self.tab_regras)
@@ -964,10 +1035,8 @@ class ConfiguracoesWidget(QWidget):
         hdr.setSectionResizeMode(_COL_CONTA,  QHeaderView.ResizeMode.Fixed)
         hdr.resizeSection(_COL_CONTA, 200)
         hdr.setSectionResizeMode(_COL_PAT,    QHeaderView.ResizeMode.Stretch)
-        hdr.setSectionResizeMode(_COL_NORMAL, QHeaderView.ResizeMode.Fixed)
-        hdr.resizeSection(_COL_NORMAL, 90)
-        hdr.setSectionResizeMode(_COL_EXTRA,  QHeaderView.ResizeMode.Fixed)
-        hdr.resizeSection(_COL_EXTRA, 90)
+        hdr.setSectionResizeMode(_COL_VALOR, QHeaderView.ResizeMode.Fixed)
+        hdr.resizeSection(_COL_VALOR, 90)
 
         # Teclas Ins/Del
         self.table_regras.keyPressEvent = self._regras_key_press
@@ -1161,6 +1230,22 @@ class ConfiguracoesWidget(QWidget):
                             importacao_params.append(rec)
 
                     if importacao_params:
+                        # carregar_configs pode devolver as linhas por ordem
+                        # alfabética da CHAVE (ex.: COD_PAGINA antes de COL_DATA).
+                        # Forçamos aqui a mesma ordem da deteção, com COD_PAGINA
+                        # sempre no fim.
+                        ordem_chaves = [
+                            "COL_DATA", "COL_DESCRICAO", "COL_VALOR", "COL_SALDO",
+                            "CSV_AUTO_DETECT", "CSV_DECIMAL", "CSV_DELIMITER",
+                            "CSV_FIRST_ROW", "CSV_THOUSANDS", "TOTAL_COLUMNS",
+                            "COD_PAGINA",
+                        ]
+                        importacao_params.sort(
+                            key=lambda rec: ordem_chaves.index(str(rec.get('CHAVE', '')).strip())
+                            if str(rec.get('CHAVE', '')).strip() in ordem_chaves
+                            else len(ordem_chaves)
+                        )
+
                         self.text_gravados.append("\n📋 Parâmetros de IMPORTACAO:\n")
                         self.text_gravados.append("-" * 60 + "\n")
                         for rec in importacao_params:

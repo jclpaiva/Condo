@@ -164,15 +164,23 @@ def processar_receitas_simplificado(df_movimentos, tabela_quotas, eps=0.5):
 
 
 def match_fracao(texto, tabela_quotas):
-    """Match de fracção por substring"""
+    """Match de fracção por substring (preferência pelo rótulo mais longo)."""
     texto_limpo = limpar_texto(texto)
-    
+    if not texto_limpo:
+        return None
+
+    # Ordenar por comprimento desc. evita que "A" case dentro de "QUOTA"
+    candidatos = []
     for fracao_nome in tabela_quotas.keys():
         fracao_limpa = limpar_texto(fracao_nome)
+        if not fracao_limpa:
+            continue
         if fracao_limpa in texto_limpo:
-            return fracao_nome
-    
-    return None
+            candidatos.append((len(fracao_limpa), fracao_nome))
+    if not candidatos:
+        return None
+    candidatos.sort(key=lambda x: (-x[0], x[1]))
+    return candidatos[0][1]
 
 
 def limpar_texto(texto):

@@ -221,117 +221,14 @@ def validar_condominos(dados):
 
 def atualizar_quotas_regras(pasta_dados, dados_condominos):
     """
-    Actualiza APENAS normal/extra nas regras de condómino já existentes.
+    DEPRECIADO (Variante B).
 
-    NÃO cria registos novos em `regras` — só o utilizador cria regras
-    (o pattern tem de ser o texto curto que Bancos procura no CSV).
-
-    Critério de match (por ordem):
-      1. conta = "Quota - {ANDAR}"  e  classe = RECEITA
-      2. conta LIKE "%{ANDAR}%"     e  classe = RECEITA  e  normal IS NOT NULL
-      3. pattern começa pelo nome   e  normal IS NOT NULL  (fallback)
-
-    Se não encontrar regra, regista aviso e continua (sem INSERT).
+    Quotas vivem só em ``quotas_fracao``; as regras de importação guardam
+    apenas o pattern (e opcionalmente a fração). Mantida como no-op para
+    não partir chamadas antigas em Condominos_Gui.
     """
-    from Database import get_connection, resolver_pasta
-    from Commons import remover_acentos
-
-    # "corrente" ou path → pasta com condominio.db
-    pasta = resolver_pasta(pasta_dados)
-    condo_db = db_path(pasta)
-    if not condo_db.exists():
-        print("⚠️ condominio.db não encontrada — quotas não actualizadas")
-        return
-
-    def conta_de_andar(andar: str) -> str:
-        return f"Quota - {andar.strip()}" if andar.strip() else "Quota"
-
-    actualizados = 0
-    sem_regra = []
-
-    try:
-        with get_connection(pasta) as conn:
-            for cond in dados_condominos:
-                nome  = str(cond.get("NOME", "")).strip()
-                if nome.startswith("[") and nome.endswith("]"):
-                    continue  # inactivo
-
-                andar = str(cond.get("ANDAR", "")).strip()
-                quota_n = float(cond.get("QUOTAN", 0) or 0)
-                quota_e = float(cond.get("QUOTAE", 0) or 0)
-
-                if not andar:
-                    continue
-
-                conta = conta_de_andar(andar)
-                pattern_nome = remover_acentos(nome).upper() if nome else ""
-
-                # 1) Match exacto por conta
-                rows = conn.execute(
-                    """SELECT id, pattern, normal, extra FROM regras
-                       WHERE classe = 'RECEITA' AND conta = ?
-                       ORDER BY id""",
-                    (conta,),
-                ).fetchall()
-
-                # 2) Match por conta contendo o andar
-                if not rows:
-                    rows = conn.execute(
-                        """SELECT id, pattern, normal, extra FROM regras
-                           WHERE classe = 'RECEITA'
-                             AND normal IS NOT NULL
-                             AND conta LIKE ?
-                           ORDER BY id""",
-                        (f"%{andar}%",),
-                    ).fetchall()
-
-                # 3) Fallback: pattern começa pelo nome (ou nome começa pelo pattern)
-                if not rows and pattern_nome:
-                    rows = conn.execute(
-                        """SELECT id, pattern, normal, extra FROM regras
-                           WHERE classe = 'RECEITA'
-                             AND normal IS NOT NULL
-                             AND (
-                               UPPER(pattern) = ?
-                               OR UPPER(pattern) LIKE ?
-                               OR ? LIKE UPPER(pattern) || '%'
-                             )
-                           ORDER BY id""",
-                        (pattern_nome, pattern_nome + "%", pattern_nome),
-                    ).fetchall()
-
-                if not rows:
-                    sem_regra.append(f"{nome or '?'} / {andar}")
-                    print(
-                        f"  ⚠ Sem regra em `regras` para {nome!r} "
-                        f"(conta={conta!r}) — quota NÃO actualizada "
-                        f"(crie a regra manualmente na aba Regras)"
-                    )
-                    continue
-
-                # Actualizar TODAS as regras encontradas (evita ficar com
-                # duplicados com valores antigos)
-                for r in rows:
-                    conn.execute(
-                        """UPDATE regras
-                           SET normal = ?, extra = ?, ativo = 1
-                           WHERE id = ?""",
-                        (quota_n, quota_e, r["id"]),
-                    )
-                    print(
-                        f"  ✓ regra id={r['id']}  {r['pattern']!r}  "
-                        f"normal {r['normal']}→{quota_n}  "
-                        f"extra {r['extra']}→{quota_e}"
-                    )
-                    actualizados += 1
-
-        print(f"  ✓ Quotas sincronizadas em regras: {actualizados} linha(s) actualizada(s)")
-        if sem_regra:
-            print(f"  ⚠ Sem regra correspondente: {', '.join(sem_regra)}")
-    except Exception as exc:
-        print(f"⚠️ Erro ao actualizar quotas em regras: {exc}")
-        import traceback
-        traceback.print_exc()
+    print("  ℹ️ atualizar_quotas_regras: no-op (quotas em quotas_fracao)")
+    return
 
 
 # Alias legado (nome antigo referia Configs; a fonte é `regras`)
@@ -684,30 +581,36 @@ def taxas_quota_por_permilagem(dados_condominos, excluir_row=None):
 
 
 def obter_quotas_para_fracao(fracao, andar, permilagem, dados_condominos, excluir_row=None):
-    """Determina QUOTAN/QUOTAE ao atribuir uma fração.
+    """Obtém QUOTAN/QUOTAE ao atribuir uma fração (só leitura).
 
-    Ordem de prioridade:
-      1. Outro condómino com a **mesma FRACAO** e quotas já definidas → copiar
-      2. Outro com o **mesmo ANDAR** e quotas já definidas → copiar
-      3. Fração/andar novos: calcular por proporção da permilagem
-         (taxa = soma quotas / soma permilagens dos restantes)
-      4. Sem base de cálculo → (0.0, 0.0) — o utilizador define manualmente
-
-    As quotas continuam sempre editáveis na grelha; este valor é apenas
-    a sugestão automática ao mudar a fração.
+    Ordem de prioridade (Variante B):
+      1. Tabela ``quotas_fracao`` em vigor para a letra da fração
+      2. Valores já carregados noutro registo da mesma fração (memória UI)
+      3. (0.0, 0.0) — editar em Configurações → Quotas
 
     Returns:
         (quota_normal, quota_extra, origem) onde origem é
-        'fracao' | 'andar' | 'permilagem' | 'vazio'
+        'quotas_fracao' | 'fracao' | 'vazio'
     """
     fracao = str(fracao or '').strip().upper()
     andar = str(andar or '').strip()
-    perm = _float_quota(permilagem)
+
+    # 1) Fonte de verdade
+    if fracao:
+        try:
+            from Database import quotas_em_vigor
+            q = quotas_em_vigor(fracao)
+            qn = round(float(q.get("QUOTA_NORMAL") or 0), 2)
+            qe = round(float(q.get("QUOTA_EXTRA") or 0), 2)
+            if qn > 0 or qe > 0:
+                return qn, qe, 'quotas_fracao'
+        except Exception:
+            pass
 
     def _tem_quotas(row):
         return _float_quota(row.get('QUOTAN')) > 0 or _float_quota(row.get('QUOTAE')) > 0
 
-    # 1) Mesma fração já existente noutro registo
+    # 2) Mesma fração já na grelha (valores lidos de quotas_fracao no load)
     if fracao:
         for row in dados_condominos or []:
             if excluir_row is not None and row is excluir_row:
@@ -721,40 +624,14 @@ def obter_quotas_para_fracao(fracao, andar, permilagem, dados_condominos, exclui
                     'fracao',
                 )
 
-    # 2) Mesmo andar já existente noutro registo
-    if andar:
-        for row in dados_condominos or []:
-            if excluir_row is not None and row is excluir_row:
-                continue
-            if str(row.get('ANDAR') or '').strip() != andar:
-                continue
-            if _tem_quotas(row):
-                return (
-                    round(_float_quota(row.get('QUOTAN')), 2),
-                    round(_float_quota(row.get('QUOTAE')), 2),
-                    'andar',
-                )
-
-    # 3) Nova fração/andar: proporção pela permilagem
-    if perm > 0:
-        taxa_n, taxa_e = taxas_quota_por_permilagem(dados_condominos, excluir_row=excluir_row)
-        if taxa_n > 0 or taxa_e > 0:
-            return (
-                round(taxa_n * perm, 2),
-                round(taxa_e * perm, 2),
-                'permilagem',
-            )
-
-    # 4) Sem referência — utilizador preenche à mão
     return 0.0, 0.0, 'vazio'
 
 
 def sincronizar_por_fracao(row_dict, fracao, por_fracao, dados_condominos=None):
     """Deriva ANDAR, PERMILAGEM e quotas a partir da FRACAO (chave canónica).
 
-    ANDAR/PERMILAGEM vêm da tabela `fracoes`. As quotas são sugeridas por
-    `obter_quotas_para_fracao` (cópia se já existir, senão proporção pela
-    permilagem). O utilizador pode sempre alterar QUOTAN/QUOTAE à mão.
+    ANDAR/PERMILAGEM vêm da tabela `fracoes`. As quotas são lidas de `quotas_fracao` via `obter_quotas_para_fracao`
+    (só visualização na grelha de condóminos).
 
     Args:
         row_dict: Dicionário do registo (modificado in-place)

@@ -77,11 +77,16 @@ def emparelhar_balanco(esq, dir):
     return [(esq[i] if i < len(esq) else ("", 0), dir[i] if i < len(dir) else ("", 0)) for i in range(max_linhas)]
 
 # ===================== GERAÇÃO DE PDF =====================
-def gerar_pdf_relatorio(pasta_dados: str):
+def gerar_pdf_relatorio(pasta_dados: str, orientacao: str = "landscape"):
     """
     Gera um único PDF com Despesas, Receitas Normais, Receitas Extraordinárias e Balanço.
     Salva como: docs/Relatorio_{ANO_EXERCICIO}.pdf
     (ano dos movimentos / exercício, não o ano civil da geração).
+
+    orientacao:
+      - "landscape" (default) — páginas separadas, fonte 9 (uso geral / ecrã)
+      - "portrait"  — os 3 mapas (Despesas, Receitas, Balanço) compactos em
+                      A4 vertical, tipicamente numa única página (ata / arquivo)
     """
     pasta_dados = resolver_pasta(BASE_DIR / pasta_dados if not Path(pasta_dados).is_absolute() else pasta_dados)
     if not db_existe(pasta_dados):
@@ -112,24 +117,32 @@ def gerar_pdf_relatorio(pasta_dados: str):
     except Exception:
         FONT_NAME = "Helvetica"
 
+    portrait = str(orientacao).lower().startswith("port")
+    page_size = A4 if portrait else landscape(A4)
+    margin = 28 if portrait else 36
+    font_size = 6.5 if portrait else 9
+    title_size = 11 if portrait else 16
+    spacer_h = 8 if portrait else 14
+
     doc = SimpleDocTemplate(
         str(pdf_file),
-        pagesize=landscape(A4),
-        leftMargin=36,
-        rightMargin=36,
-        topMargin=36,
-        bottomMargin=36
+        pagesize=page_size,
+        leftMargin=margin,
+        rightMargin=margin,
+        topMargin=margin,
+        bottomMargin=margin,
     )
-    page_width, _ = landscape(A4)
-    usable_width = page_width - 72
+    page_width, _ = page_size
+    usable_width = page_width - 2 * margin
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle(
         name="ReportTitle",
         fontName=FONT_NAME,
-        fontSize=16,
+        fontSize=title_size,
         alignment=1,
         textColor=HexColor(THEME["primary"]),
-        spaceAfter=20
+        spaceAfter=6 if portrait else 20,
+        spaceBefore=4 if portrait else 0,
     ))
     elements = []
 
@@ -151,62 +164,81 @@ def gerar_pdf_relatorio(pasta_dados: str):
             data.append(linha)
         t = Table(data, repeatRows=1, colWidths=colWidths)
         style = [
-            ("FONT", (0,0), (-1,-1), FONT_NAME),
-            ("FONTSIZE", (0,0), (-1,-1), 9),
-            ("GRID", (0,0), (-1,-1), 0.25, HexColor(THEME["border"])),
-            ("BACKGROUND", (0,0), (-1,0), HexColor(THEME["total_bg"])),
-            ("ALIGN", (1,0), (-1,-1), "RIGHT"),
-            ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+            ("FONT", (0, 0), (-1, -1), FONT_NAME),
+            ("FONTSIZE", (0, 0), (-1, -1), font_size),
+            ("GRID", (0, 0), (-1, -1), 0.25, HexColor(THEME["border"])),
+            ("BACKGROUND", (0, 0), (-1, 0), HexColor(THEME["total_bg"])),
+            ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 2 if portrait else 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2 if portrait else 3),
+            ("LEFTPADDING", (0, 0), (-1, -1), 2 if portrait else 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 2 if portrait else 4),
         ]
         for r, c in negativos:
             style.append(("TEXTCOLOR", (c, r), (c, r), red))
         t.setStyle(TableStyle(style))
         elements.append(t)
-        elements.append(Spacer(1, 14))
+        elements.append(Spacer(1, spacer_h))
 
+    # --- Despesas ---
     if despesas[0]:
         num_cols_d = len(despesas[1])
-        first_col = 140
+        first_col = 90 if portrait else 140
         rest_width = usable_width - first_col
-        other_cols = rest_width / (num_cols_d - 1)
+        other_cols = rest_width / max(num_cols_d - 1, 1)
         colWidths_d = [first_col] + [other_cols] * (num_cols_d - 1)
         tabela_simples("Despesas", despesas[0], despesas[1], colWidths_d)
-        elements.append(PageBreak())
+        if not portrait:
+            elements.append(PageBreak())
 
+    # --- Receitas ---
+    colWidths_r = None
     if receitasN[0]:
         num_cols_r = len(receitasN[1])
-        col_width = usable_width / num_cols_r
+        col_width = usable_width / max(num_cols_r, 1)
         colWidths_r = [col_width] * num_cols_r
         tabela_simples("Receitas Normais", receitasN[0], receitasN[1], colWidths_r)
-        elements.append(Spacer(1, 18))
+        if not portrait:
+            elements.append(Spacer(1, 18))
     if receitasE[0]:
+        if colWidths_r is None:
+            num_cols_r = len(receitasE[1])
+            col_width = usable_width / max(num_cols_r, 1)
+            colWidths_r = [col_width] * num_cols_r
         tabela_simples("Receitas Extraordinárias", receitasE[0], receitasE[1], colWidths_r)
-        elements.append(PageBreak())
+        if not portrait:
+            elements.append(PageBreak())
 
+    # --- Balanço ---
     if balanco_rows:
-        esq, dir = separar_balanco_por_marcador(balanco_rows)
-        linhas = emparelhar_balanco(esq, dir)
+        esq, dir_ = separar_balanco_por_marcador(balanco_rows)
+        linhas = emparelhar_balanco(esq, dir_)
         elements.append(Paragraph("Balanço da Administração", styles["ReportTitle"]))
         data = [["Débitos", "", "Créditos", ""]]
         negativos = []
         for row_idx, (e, d) in enumerate(linhas, start=1):
-            if e[1] < 0: negativos.append((row_idx, 1))
-            if d[1] < 0: negativos.append((row_idx, 3))
+            if e[1] < 0:
+                negativos.append((row_idx, 1))
+            if d[1] < 0:
+                negativos.append((row_idx, 3))
             data.append([e[0], format_number(e[1]), d[0], format_number(d[1])])
         t = Table(data, colWidths=[
             usable_width * 0.35,
             usable_width * 0.15,
             usable_width * 0.35,
-            usable_width * 0.15
+            usable_width * 0.15,
         ])
         style = [
-            ("FONT", (0,0), (-1,-1), FONT_NAME),
-            ("FONTSIZE", (0,0), (-1,-1), 9),
-            ("GRID", (0,0), (-1,-1), 0.25, HexColor(THEME["border"])),
-            ("BACKGROUND", (0,0), (-1,0), HexColor(THEME["total_bg"])),
-            ("ALIGN", (1,0), (1,-1), "RIGHT"),
-            ("ALIGN", (3,0), (3,-1), "RIGHT"),
-            ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+            ("FONT", (0, 0), (-1, -1), FONT_NAME),
+            ("FONTSIZE", (0, 0), (-1, -1), font_size),
+            ("GRID", (0, 0), (-1, -1), 0.25, HexColor(THEME["border"])),
+            ("BACKGROUND", (0, 0), (-1, 0), HexColor(THEME["total_bg"])),
+            ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+            ("ALIGN", (3, 0), (3, -1), "RIGHT"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 2 if portrait else 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2 if portrait else 3),
         ]
         for r, c in negativos:
             style.append(("TEXTCOLOR", (c, r), (c, r), red))

@@ -1,0 +1,50 @@
+{
+  "aprovado_em": "2026-11-06T22:42:29",
+  "exercicio_origem": 2026,
+  "exercicio_destino": 2027,
+  "incremento_pct": 3.1,
+  "incluir_normais": true,
+  "incluir_extras": false,
+  "total_normais_proj_base": 1513.51,
+  "total_extras_proj_base": 0.0,
+  "total_normais_proj": 1530.0,
+  "total_extras_proj": 0.0,
+  "valor_orcamentado": 1530.0,
+  "fracoes": [
+    {
+      "fracao": "A",
+      "quota_normal": 18.5,
+      "quota_extra": 0.0
+    },
+    {
+      "fracao": "B",
+      "quota_normal": 16.5,
+      "quota_extra": 0.0
+    },
+    {
+      "fracao": "C",
+      "quota_normal": 20.5,
+      "quota_extra": 0.0
+    },
+    {
+      "fracao": "D",
+      "quota_normal": 18.5,
+      "quota_extra": 0.0
+    },
+    {
+      "fracao": "E",
+      "quota_normal": 29.0,
+      "quota_extra": 0.0
+    },
+    {
+      "fracao": "F",
+      "quota_normal": 24.5,
+      "quota_extra": 0.0
+    },
+    {
+      "fracao": "G",
+      "quota_normal": 0.0,
+      "quota_extra": 0.0
+    }
+  ]
+}

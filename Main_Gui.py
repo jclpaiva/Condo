@@ -27,6 +27,7 @@ from DPrazo_Gui import DPrazoWidget
 from Despesas_Gui import DespesasWidget
 from Receitas_Gui import ReceitasWidget
 from Balanco_Gui import BalancoWidget
+from Orcamento_Gui import OrcamentoWidget
 from Dashboard_Gui import DashboardWidget
 from Fim_Ano_Gui import FimAnoWidget
 from Configuracoes_Gui import ConfiguracoesWidget
@@ -126,10 +127,12 @@ class MainWindow(QMainWindow):
         self.despesas_widget = None
         self.receitas_widget = None
         self.balanco_widget = None
+        self.docs_widget = None   
+        self.fim_ano_widget = None        
         self.condominos_widget = None
         self.configuracoes_widget = None
-        self.fim_ano_widget = None
-        self.docs_widget = None
+
+
         
         # ✅ NOVO: Comando de lançamento do Mailspring (lido do registry ou fallback)
         self.mailspring_launch_cmd = get_mailspring_launch_cmd()
@@ -201,9 +204,9 @@ class MainWindow(QMainWindow):
                 QLabel("<h2>Selecione o ano de trabalho</h2>", alignment=Qt.AlignmentFlag.AlignCenter), 
                 "Balanço"
             )
-            self.tab_condominos_index = self.tabs.addTab(
-                QLabel("<h2>Selecione o ano de trabalho</h2>", alignment=Qt.AlignmentFlag.AlignCenter), 
-                "Condóminos"
+            self.tab_orcamento_index = self.tabs.addTab(
+                QLabel("<h2>Selecione o ano de trabalho</h2>", alignment=Qt.AlignmentFlag.AlignCenter),
+                "Orçamento"
             )
             self.tab_docs_index = self.tabs.addTab(
                 QLabel("<h2>Selecione o ano de trabalho</h2>", alignment=Qt.AlignmentFlag.AlignCenter), 
@@ -212,6 +215,10 @@ class MainWindow(QMainWindow):
             self.tab_fim_ano_index = self.tabs.addTab(
                 QLabel("<h2>Selecione o ano de trabalho</h2>", alignment=Qt.AlignmentFlag.AlignCenter), 
                 "Encerrar Ano"
+            )
+            self.tab_condominos_index = self.tabs.addTab(
+                QLabel("<h2>Selecione o ano de trabalho</h2>", alignment=Qt.AlignmentFlag.AlignCenter), 
+                "Condóminos"
             )
             self.tab_configuracoes_index = self.tabs.addTab(
                 QLabel("<h2>Selecione o ano de trabalho</h2>", alignment=Qt.AlignmentFlag.AlignCenter), 
@@ -439,8 +446,19 @@ class MainWindow(QMainWindow):
             lay.addSpacing(20)
 
             # Botões: corrente | histórico | exportar P/Condo42
-            btn_layout = QHBoxLayout()
-            btn_layout.addStretch()
+            # Contorno à volta dos 3 botões (como na mockup da Home)
+            btn_frame = QFrame()
+            btn_frame.setObjectName("homeExercicioFrame")
+            btn_frame.setStyleSheet("""
+                QFrame#homeExercicioFrame {
+                    background-color: #ffffff;
+                    border: 1px solid #d0d5dd;
+                    border-radius: 12px;
+                }
+            """)
+            btn_layout = QHBoxLayout(btn_frame)
+            btn_layout.setContentsMargins(24, 20, 24, 20)
+            btn_layout.setSpacing(30)
             btn_corrente = QPushButton("Trabalhar no Ano Corrente")
             btn_corrente.setFixedSize(250, 70)
             btn_corrente.clicked.connect(self.selecionar_corrente)
@@ -455,12 +473,14 @@ class MainWindow(QMainWindow):
             )
             btn_export.clicked.connect(self.exportar_condo42)
             btn_layout.addWidget(btn_corrente)
-            btn_layout.addSpacing(30)
             btn_layout.addWidget(btn_historico)
-            btn_layout.addSpacing(30)
             btn_layout.addWidget(btn_export)
-            btn_layout.addStretch()
-            lay.addLayout(btn_layout)
+
+            frame_row = QHBoxLayout()
+            frame_row.addStretch()
+            frame_row.addWidget(btn_frame)
+            frame_row.addStretch()
+            lay.addLayout(frame_row)
             
             # 2. MOLA INFERIOR: Garante o equilíbrio com a mola do topo
             lay.addStretch(1)
@@ -625,6 +645,14 @@ class MainWindow(QMainWindow):
                 self.tab_balanco_index, self.balanco_widget, "Balanço"
             )
             self.balanco_widget.set_pasta_dados(self.pasta_dados)
+
+            # Widget de Orçamento
+            self.orcamento_widget = OrcamentoWidget(parent=self)
+            self.tabs.removeTab(self.tab_orcamento_index)
+            self.tab_orcamento_index = self.tabs.insertTab(
+                self.tab_orcamento_index, self.orcamento_widget, "Orçamento"
+            )
+            self.orcamento_widget.set_pasta_dados(self.pasta_dados)
 
             # Widget de Documentos
             self.docs_widget = DocsWidget(parent=self)

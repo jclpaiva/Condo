@@ -13,14 +13,14 @@ from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from PyQt6.QtCore import Qt, QSize, QTimer, QDate, QTime
-from PyQt6.QtGui import QPixmap, QImage, QKeySequence, QShortcut, QIcon, QFont
+from PyQt6.QtCore import Qt, QSize, QTimer, QDate, QTime, QRectF, QPointF
+from PyQt6.QtGui import QPixmap, QImage, QKeySequence, QShortcut, QIcon, QFont, QPainter, QPen, QColor
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QGroupBox,
     QLabel, QMessageBox, QFileDialog, QScrollArea, QSlider,
     QDialog, QTextEdit, QListWidget, QListWidgetItem, QLineEdit,
     QFormLayout, QComboBox, QDateEdit, QTimeEdit, QSpinBox,
-    QFrame, QSizePolicy, QSplitter,
+    QFrame, QSizePolicy, QSplitter, QCheckBox, QGridLayout,
 )
 # Acesso a dados → Database
 from Database import carregar_condominos, existe_dados
@@ -219,6 +219,114 @@ def enviar_email_gmail_custom(destinatarios, anexos, assunto, corpo, contatos=No
 # ====================================================================
 # DIÁLOGO DE ENVIO DE EMAIL
 # ====================================================================
+def formatar_data_ddmmaaaa(texto: str) -> str:
+    """Normaliza uma data digitada para DD-MM-YYYY.
+
+    Aceita só dígitos (01012030), ou com separadores quaisquer (1/1/2030, 01.01.2030).
+    Anos com 2 dígitos passam a 20YY. Se não for uma data válida devolve o texto original.
+    """
+    import re
+    t = (texto or "").strip()
+    if not t:
+        return ""
+    partes = [x for x in re.split(r"\D+", t) if x]
+    if len(partes) >= 3:                      # com separadores
+        d, m, a = partes[0], partes[1], partes[2]
+        if len(d) == 4:                       # AAAA-MM-DD (ex.: vindo da BD)
+            d, m, a = a, m, d
+    else:                                     # só dígitos
+        dig = "".join(partes)
+        if len(dig) == 8:
+            d, m, a = dig[:2], dig[2:4], dig[4:]
+        elif len(dig) == 6:
+            d, m, a = dig[:2], dig[2:4], dig[4:]
+        else:
+            return t
+    if len(a) == 2:
+        a = "20" + a
+    try:
+        dt = date(int(a), int(m), int(d))
+    except ValueError:
+        return t
+    return dt.strftime("%d-%m-%Y")
+
+
+def formatar_cc(texto: str) -> tuple[str, bool]:
+    """Formata o n.º do Cartão de Cidadão como '009211228 ZX2 2'.
+
+    Grupos: 9 dígitos (zeros à esquerda se faltarem) | 2 letras + 1 dígito | 1 dígito.
+    Aceita o texto com ou sem espaços/traços. Devolve (texto, válido).
+    """
+    import re
+    t = re.sub(r"[\s\-]+", "", (texto or "")).upper()
+    if not t:
+        return "", True
+    m = re.fullmatch(r"(\d{1,9})([A-Z]{2}\d)(\d)", t)
+    if not m:
+        return (texto or "").strip(), False
+    return f"{m.group(1).zfill(9)} {m.group(2)} {m.group(3)}", True
+
+
+def formatar_nif(texto: str) -> tuple[str, bool]:
+    """Formata o NIF com 9 dígitos (zeros à esquerda) e valida o dígito de controlo."""
+    import re
+    t = re.sub(r"[\s\-\.]+", "", (texto or ""))
+    if not t:
+        return "", True
+    if not t.isdigit() or len(t) > 9:
+        return (texto or "").strip(), False
+    t = t.zfill(9)
+    soma = sum(int(d) * p for d, p in zip(t[:8], range(9, 1, -1)))
+    ctrl = 11 - soma % 11
+    ctrl = 0 if ctrl >= 10 else ctrl
+    return t, ctrl == int(t[8])
+
+
+class CheckCruzVerde(QCheckBox):
+    """QCheckBox (multi-seleção) cujo indicador mostra uma cruz verde quando marcado."""
+
+    _BOX = 18
+
+    def __init__(self, texto="", parent=None):
+        super().__init__(texto, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        f = self.font()
+        f.setBold(True)
+        self.setFont(f)
+
+    def sizeHint(self):
+        fm = self.fontMetrics()
+        return QSize(self._BOX + 6 + fm.horizontalAdvance(self.text()) + 2,
+                     max(self._BOX, fm.height()) + 2)
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        h = self.height()
+        box = QRectF(1, (h - self._BOX) / 2, self._BOX, self._BOX)
+        verde = QColor("#2E9E44")
+        p.setPen(QPen(QColor("#8a8a8a"), 1))
+        p.setBrush(QColor("white"))
+        p.drawRoundedRect(box, 3, 3)
+        if self.isChecked():
+            pen = QPen(verde, 2.4)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(pen)
+            m = 4.5
+            p.drawLine(QPointF(box.left() + m, box.top() + m),
+                       QPointF(box.right() - m, box.bottom() - m))
+            p.drawLine(QPointF(box.right() - m, box.top() + m),
+                       QPointF(box.left() + m, box.bottom() - m))
+        p.setPen(self.palette().color(self.foregroundRole()))
+        p.drawText(QRectF(box.right() + 6, 0, self.width() - box.right() - 6, h),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                   self.text())
+        p.end()
+
+
 class EmailDialog(QDialog):
     """Diálogo simples para enviar email com anexos - estilo Gmail"""
     def __init__(self, contatos, anexos_iniciais=None, parent=None):
@@ -727,49 +835,9 @@ class DocsWidget(QWidget):
     def init_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(12)
+        root.setSpacing(10)
 
-        # ========== SECÇÃO 1: Visualizar Documentos ==========
-        grp_view = QGroupBox("Visualizar Documentos")
-        grp_view.setStyleSheet(
-            "QGroupBox { font-size: 14px; font-weight: bold; color: #2F5597; "
-            "border: 1px solid #c5d0e0; border-radius: 6px; margin-top: 10px; padding-top: 8px; }"
-            "QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; }"
-        )
-        lay_view = QVBoxLayout(grp_view)
-        lay_view.setSpacing(8)
-
-        btn_bar = QHBoxLayout()
-        btn_selecionar = QPushButton("→ Selecionar PDF")
-        btn_selecionar.setFixedSize(155, 42)
-        icon_path = ICONS_DIR / "pdf-icon.png"
-        if icon_path.exists():
-            btn_selecionar.setIcon(QIcon(str(icon_path)))
-        btn_selecionar.setIconSize(QSize(30, 30))
-        btn_selecionar.clicked.connect(self.abrir_seletor_pdf)
-        btn_bar.addWidget(btn_selecionar)
-        btn_bar.addStretch()
-        lay_view.addLayout(btn_bar)
-
-        info_text = (
-            "Selecione um documento PDF para visualização (pasta padrão: docs/)."
-        )
-        if FITZ_AVAILABLE:
-            info_text += "  ✅ PyMuPDF disponível"
-        else:
-            info_text += "  ❌ PyMuPDF não instalado (pip install PyMuPDF)"
-        info_label = QLabel(info_text)
-        info_label.setStyleSheet("color: #666; font-size: 11px; font-weight: normal;")
-        info_label.setWordWrap(True)
-        lay_view.addWidget(info_label)
-
-        self.status_label = QLabel("⏳ Aguardando seleção de documento...")
-        self.status_label.setStyleSheet("color: #666; font-style: italic; font-weight: normal;")
-        lay_view.addWidget(self.status_label)
-
-        root.addWidget(grp_view)
-
-        # ========== SECÇÃO 2: Criar Ata de Reunião ==========
+        # ========== Criar Ata de Reunião ==========
         grp_ata = QGroupBox("Criar Ata de Reunião")
         grp_ata.setStyleSheet(
             "QGroupBox { font-size: 14px; font-weight: bold; color: #2F5597; "
@@ -791,7 +859,7 @@ class DocsWidget(QWidget):
 
         self.lbl_anos = QLabel("—")
         self.lbl_anos.setStyleSheet("font-weight: normal;")
-        row1.addWidget(_lbl("Anos (ant. → atual):"))
+        row1.addWidget(_lbl("Ano do exercício:"))
         row1.addWidget(self.lbl_anos)
         row1.addSpacing(16)
 
@@ -836,69 +904,95 @@ class DocsWidget(QWidget):
         row1.addWidget(self.time_fim)
         lay_ata.addLayout(row1)
 
-        # ----- Linha 2: Admin. cessante | Fração |   | Novo admin | Fr. | Andar -----
-        row2 = QHBoxLayout()
-        row2.setSpacing(10)
+        # ----- Linhas 2 e 3 numa grelha partilhada (alinhamento vertical das colunas) -----
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+        grid.setColumnStretch(1, 2)   # combo admin cessante
+        grid.setColumnStretch(6, 2)   # combo novo admin
+        grid.setColumnMinimumWidth(4, 14)
 
-        self.edit_admin_ant = QLineEdit()
-        self.edit_admin_ant.setPlaceholderText("Administrador cessante")
-        self.edit_admin_ant.setMinimumWidth(180)
-        row2.addWidget(_lbl("Admin. cessante:"))
-        row2.addWidget(self.edit_admin_ant, 2)
+        # --- Linha 2: Admin. cessante | Fração | Novo admin | Fr. | Andar ---
+        self.combo_admin_ant = QComboBox()
+        self.combo_admin_ant.setMinimumWidth(180)
+        self.combo_admin_ant.currentIndexChanged.connect(self._on_admin_ant_changed)
+        grid.addWidget(_lbl("Admin. cessante:"), 0, 0)
+        grid.addWidget(self.combo_admin_ant, 0, 1)
 
         self.edit_fracao_ant = QLineEdit()
         self.edit_fracao_ant.setFixedWidth(44)
         self.edit_fracao_ant.setPlaceholderText("Fr.")
-        row2.addWidget(_lbl("Fração:"))
-        row2.addWidget(self.edit_fracao_ant)
-
-        row2.addSpacing(24)
+        grid.addWidget(_lbl("Fração:"), 0, 2)
+        grid.addWidget(self.edit_fracao_ant, 0, 3)
 
         self.combo_novo_admin = QComboBox()
         self.combo_novo_admin.setMinimumWidth(180)
         self.combo_novo_admin.currentIndexChanged.connect(self._on_novo_admin_changed)
-        row2.addWidget(_lbl("Novo administrador:"))
-        row2.addWidget(self.combo_novo_admin, 2)
+        grid.addWidget(_lbl("Novo administrador:"), 0, 5)
+        grid.addWidget(self.combo_novo_admin, 0, 6)
 
         self.edit_fracao = QLineEdit()
         self.edit_fracao.setFixedWidth(44)
         self.edit_fracao.setPlaceholderText("Fr.")
-        row2.addWidget(_lbl("Fr.:"))
-        row2.addWidget(self.edit_fracao)
+        grid.addWidget(_lbl("Fr.:"), 0, 7)
+        grid.addWidget(self.edit_fracao, 0, 8)
 
         self.edit_andar = QLineEdit()
         self.edit_andar.setPlaceholderText("Andar")
         self.edit_andar.setFixedWidth(90)
-        row2.addWidget(_lbl("Andar:"))
-        row2.addWidget(self.edit_andar)
-        lay_ata.addLayout(row2)
+        grid.addWidget(_lbl("Andar:"), 0, 9)
+        grid.addWidget(self.edit_andar, 0, 10)
 
-        # ----- Linha 3: CC |   | Validade | NIF -----
-        row3 = QHBoxLayout()
-        row3.setSpacing(10)
+        # --- Linha 3: CC (esq.) ... Validade | NIF (terminam sob o campo Fração) | Presenças ---
+        grid.addWidget(_lbl("Cartão Cidadão:"), 1, 0)
+
+        cc_box = QHBoxLayout()
+        cc_box.setSpacing(10)
+        cc_box.setContentsMargins(0, 0, 0, 0)
 
         self.edit_cc = QLineEdit()
         self.edit_cc.setPlaceholderText("N.º Cartão de Cidadão")
-        row3.addWidget(_lbl("CC / NIF:"))
-        row3.addWidget(self.edit_cc, 3)
+        self.edit_cc.setMinimumWidth(140)
+        self.edit_cc.setMaxLength(16)
+        self.edit_cc.editingFinished.connect(self._formatar_cc)
+        cc_box.addWidget(self.edit_cc, 1)
 
-        row3.addSpacing(24)
-
+        cc_box.addSpacing(10)
         self.edit_cc_val = QLineEdit()
         self.edit_cc_val.setPlaceholderText("dd-mm-aaaa")
         self.edit_cc_val.setFixedWidth(110)
-        row3.addWidget(_lbl("Validade:"))
-        row3.addWidget(self.edit_cc_val)
-        row3.addSpacing(16)
+        self.edit_cc_val.setMaxLength(10)
+        # Enter (ou perda de foco) formata para DD-MM-YYYY
+        self.edit_cc_val.editingFinished.connect(self._formatar_cc_validade)
+        cc_box.addWidget(_lbl("Validade:"))
+        cc_box.addWidget(self.edit_cc_val)
 
         self.edit_nif = QLineEdit()
         self.edit_nif.setPlaceholderText("NIF")
         self.edit_nif.setFixedWidth(100)
-        row3.addWidget(_lbl("NIF:"))
-        row3.addWidget(self.edit_nif)
-        lay_ata.addLayout(row3)
+        self.edit_nif.setMaxLength(9)
+        self.edit_nif.editingFinished.connect(self._formatar_nif)
+        cc_box.addWidget(_lbl("NIF:"))
+        cc_box.addWidget(self.edit_nif)
 
-        # --- assuntos de interesse geral (máximo espaço vertical) ---
+        # ocupa as colunas 1-3 -> o NIF termina exatamente por baixo do campo "Fração"
+        grid.addLayout(cc_box, 1, 1, 1, 3)
+
+        # Presenças por fração (a partir da BD), alinhadas com "Novo administrador"
+        grid.addWidget(_lbl("Presenças:"), 1, 5)
+        self._presencas_checks: dict[str, QCheckBox] = {}
+        self._presencas_bar = QHBoxLayout()
+        self._presencas_bar.setSpacing(22)   # intervalo maior entre cada caixa+fração
+        self._presencas_bar.setContentsMargins(0, 0, 0, 0)
+        pres_wrap = QHBoxLayout()
+        pres_wrap.setContentsMargins(0, 0, 0, 0)
+        pres_wrap.addLayout(self._presencas_bar)
+        pres_wrap.addStretch(1)
+        grid.addLayout(pres_wrap, 1, 6, 1, 5)
+
+        lay_ata.addLayout(grid)
+
+        # --- assuntos de interesse geral ---
         lbl_assuntos = QLabel("4. Assuntos de interesse geral:")
         lbl_assuntos.setStyleSheet("font-weight: bold; color: #333; margin-top: 8px;")
         lay_ata.addWidget(lbl_assuntos)
@@ -915,10 +1009,19 @@ class DocsWidget(QWidget):
         )
         lay_ata.addWidget(self.txt_assuntos, 1)
 
-        # --- botões ---
-        btn_row = QHBoxLayout()
+        self.lbl_ata_status = QLabel("")
+        self.lbl_ata_status.setStyleSheet("color: #666; font-style: italic; font-weight: normal;")
+        self.lbl_ata_status.setWordWrap(True)
+        lay_ata.addWidget(self.lbl_ata_status)
+
+        root.addWidget(grp_ata, 1)
+
+        # ========== Rodapé: Gerar Ata (esq.) + Visualizar Documentos (dir.) ==========
+        footer = QHBoxLayout()
+        footer.setSpacing(16)
+
         self.btn_gerar = QPushButton("📄  Gerar Ata (.docx)")
-        self.btn_gerar.setFixedHeight(40)
+        self.btn_gerar.setFixedHeight(42)
         self.btn_gerar.setStyleSheet(
             "QPushButton { background-color: #2F5597; color: white; font-weight: bold; "
             "border-radius: 5px; padding: 6px 16px; }"
@@ -927,22 +1030,52 @@ class DocsWidget(QWidget):
         )
         self.btn_gerar.clicked.connect(self.gerar_ata_clicked)
 
-        #self.btn_recarregar = QPushButton("🔄")
-        #self.btn_recarregar.setFixedSize(40, 40)
-        #self.btn_recarregar.setToolTip("Recarregar dados da base de dados")
-        #self.btn_recarregar.clicked.connect(self.carregar_form_ata)
+        grp_gerar = QGroupBox("Gerar Documento")
+        grp_gerar.setStyleSheet(
+            "QGroupBox { font-size: 12px; font-weight: bold; color: #2F5597; "
+            "border: 1px solid #c5d0e0; border-radius: 6px; margin-top: 8px; padding-top: 6px; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }"
+        )
+        lay_gerar = QHBoxLayout(grp_gerar)
+        lay_gerar.setContentsMargins(10, 8, 10, 8)
+        lay_gerar.addWidget(self.btn_gerar, alignment=Qt.AlignmentFlag.AlignVCenter)
+        footer.addWidget(grp_gerar)
 
-        btn_row.addWidget(self.btn_gerar)
-        #btn_row.addWidget(self.btn_recarregar)
-        btn_row.addStretch()
-        lay_ata.addLayout(btn_row)
+        grp_view = QGroupBox("Visualizar Documentos")
+        grp_view.setStyleSheet(
+            "QGroupBox { font-size: 12px; font-weight: bold; color: #2F5597; "
+            "border: 1px solid #c5d0e0; border-radius: 6px; margin-top: 8px; padding-top: 6px; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }"
+        )
+        lay_view = QHBoxLayout(grp_view)
+        lay_view.setSpacing(14)
+        lay_view.setContentsMargins(10, 8, 10, 8)
 
-        self.lbl_ata_status = QLabel("")
-        self.lbl_ata_status.setStyleSheet("color: #666; font-style: italic; font-weight: normal;")
-        self.lbl_ata_status.setWordWrap(True)
-        lay_ata.addWidget(self.lbl_ata_status)
+        btn_selecionar = QPushButton("→ Selecionar PDF")
+        btn_selecionar.setFixedSize(155, 40)
+        icon_path = ICONS_DIR / "pdf-icon.png"
+        if icon_path.exists():
+            btn_selecionar.setIcon(QIcon(str(icon_path)))
+        btn_selecionar.setIconSize(QSize(28, 28))
+        btn_selecionar.clicked.connect(self.abrir_seletor_pdf)
+        lay_view.addWidget(btn_selecionar)
 
-        root.addWidget(grp_ata, 1)
+        info_text = "Selecione um documento PDF para visualização (pasta padrão: docs/)."
+        if FITZ_AVAILABLE:
+            info_text += "  ✅ PyMuPDF disponível"
+        else:
+            info_text += "  ❌ PyMuPDF não instalado"
+        info_label = QLabel(info_text)
+        info_label.setStyleSheet("color: #666; font-size: 10px; font-weight: normal;")
+        lay_view.addWidget(info_label)
+
+        self.status_label = QLabel("⏳ Aguardando seleção de documento...")
+        self.status_label.setStyleSheet("color: #666; font-style: italic; font-size: 10px; font-weight: normal;")
+        lay_view.addWidget(self.status_label)
+        lay_view.addStretch(1)
+
+        footer.addWidget(grp_view, 1)
+        root.addLayout(footer)
 
     # ------------------------------------------------------------------
     # Carregamento / preenchimento do formulário
@@ -963,9 +1096,11 @@ class DocsWidget(QWidget):
             return
 
         self.spin_num_adm.setValue(int(dados.get("num_adm") or 1))
-        ano = dados.get("ano_exercicio") or date.today().year
-        ano_ant = dados.get("ano_exercicio_ant") or (ano - 1)
-        self.lbl_anos.setText(f"{ano_ant}  →  {ano}")
+        # ano_exercicio_ant = contas a aprovar (ANO_EXERCICIO na BD, ainda aberto)
+        # ano_exercicio     = orçamento / novo exercício (N+1)
+        ano_ant = dados.get("ano_exercicio_ant") or date.today().year
+        ano = dados.get("ano_exercicio") or (ano_ant + 1)
+        self.lbl_anos.setText(f"{ano_ant} (orç. {ano})")
         self._ano_exercicio = ano
         self._ano_exercicio_ant = ano_ant
 
@@ -980,15 +1115,29 @@ class DocsWidget(QWidget):
         self.time_ini.setTime(QTime(hi.hour, hi.minute))
         self.time_fim.setTime(QTime(hf.hour, hf.minute))
 
-        self.edit_admin_ant.setText(dados.get("admin_ant") or "")
-        self.edit_fracao_ant.setText(dados.get("fracao_ant") or "")
-
         self._condominos_cache = dados.get("condominos") or []
+
+        # --- combos admin cessante + novo admin ---
+        nome_ant = (dados.get("admin_ant") or "").strip()
+        nome_novo = (dados.get("administrador") or "").strip()
+
+        self.combo_admin_ant.blockSignals(True)
+        self.combo_admin_ant.clear()
+        self.combo_admin_ant.addItem("— selecionar —", None)
+        idx_ant = 0
+        for i, c in enumerate(self._condominos_cache, start=1):
+            nome = c.get("NOME") or ""
+            self.combo_admin_ant.addItem(nome, c)
+            if nome_ant and nome == nome_ant:
+                idx_ant = i
+        self.combo_admin_ant.setCurrentIndex(idx_ant)
+        self.combo_admin_ant.blockSignals(False)
+        self._on_admin_ant_changed(idx_ant)
+
         self.combo_novo_admin.blockSignals(True)
         self.combo_novo_admin.clear()
         self.combo_novo_admin.addItem("— selecionar —", None)
         idx_novo = 0
-        nome_novo = (dados.get("administrador") or "").strip()
         for i, c in enumerate(self._condominos_cache, start=1):
             nome = c.get("NOME") or ""
             self.combo_novo_admin.addItem(nome, c)
@@ -996,11 +1145,108 @@ class DocsWidget(QWidget):
                 idx_novo = i
         self.combo_novo_admin.setCurrentIndex(idx_novo)
         self.combo_novo_admin.blockSignals(False)
-        # Preencher CC/NIF/fração do novo admin já selecionado
         self._on_novo_admin_changed(idx_novo)
+
+        # --- checkboxes de presença por fração (BD) ---
+        self._rebuild_presencas_checks()
 
         self.txt_assuntos.setPlainText(dados.get("assuntos_gerais") or "")
         self.lbl_ata_status.setText("Dados carregados da base de dados.")
+
+    def _rebuild_presencas_checks(self):
+        """Cria/atualiza checkboxes de presença a partir das frações na BD."""
+        # Limpar widgets anteriores
+        while self._presencas_bar.count():
+            item = self._presencas_bar.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._presencas_checks = {}
+
+        # Ordenar por letra de fração
+        fracoes = sorted(
+            {
+                str(c.get("FRACAO") or "").strip().upper()
+                for c in self._condominos_cache
+                if str(c.get("FRACAO") or "").strip()
+            }
+        )
+        if not fracoes:
+            # Fallback mínimo se a BD não devolver frações
+            fracoes = ["A", "B", "C", "D", "E", "F"]
+
+        for fr in fracoes:
+            cb = CheckCruzVerde(fr)
+            cb.setChecked(True)  # por omissão todos presentes
+            cb.setToolTip(f"Fração {fr} presente na reunião")
+            self._presencas_checks[fr] = cb
+            self._presencas_bar.addWidget(cb)
+
+    def _formatar_cc_validade(self):
+        """Converte o que foi digitado (ex.: 01012030) para DD-MM-YYYY."""
+        txt = self.edit_cc_val.text()
+        novo = formatar_data_ddmmaaaa(txt)
+        if novo != txt:
+            self.edit_cc_val.setText(novo)
+        # destaca a vermelho se não for uma data válida
+        valido = (not novo) or len(novo) == 10 and novo[2] == "-" and novo[5] == "-"
+        self.edit_cc_val.setStyleSheet("" if valido else "border: 1px solid #d33;")
+        self.edit_cc_val.setToolTip("" if valido else "Data inválida. Use DD-MM-AAAA (ex.: 31-12-2030).")
+
+    @staticmethod
+    def _marcar_campo(edit: "QLineEdit", valido: bool, msg: str):
+        edit.setStyleSheet("" if valido else "border: 1px solid #d33;")
+        edit.setToolTip("" if valido else msg)
+
+    def _formatar_cc(self):
+        """Enter/perda de foco: '9211228ZX22' -> '009211228 ZX2 2'."""
+        novo, ok = formatar_cc(self.edit_cc.text())
+        if novo != self.edit_cc.text():
+            self.edit_cc.setText(novo)
+        self._marcar_campo(self.edit_cc, ok,
+                           "N.º inválido. Formato: 9 dígitos + 2 letras e 1 dígito + 1 dígito "
+                           "(ex.: 009211228 ZX2 2).")
+
+    def _formatar_nif(self):
+        """Enter/perda de foco: completa com zeros à esquerda até 9 dígitos e valida."""
+        novo, ok = formatar_nif(self.edit_nif.text())
+        if novo != self.edit_nif.text():
+            self.edit_nif.setText(novo)
+        self._marcar_campo(self.edit_nif, ok, "NIF inválido (9 dígitos e dígito de controlo).")
+
+    def _fracoes_presentes(self) -> list[str]:
+        """Lista ordenada das frações marcadas como presentes."""
+        return [fr for fr, cb in sorted(self._presencas_checks.items()) if cb.isChecked()]
+
+    def _permilagem_presentes(self) -> int:
+        """Soma das permilagens (×1000) das frações presentes."""
+        presentes = set(self._fracoes_presentes())
+        total = 0.0
+        for c in self._condominos_cache:
+            fr = str(c.get("FRACAO") or "").strip().upper()
+            if fr in presentes:
+                try:
+                    total += float(c.get("PERMILAGEM") or 0)
+                except (TypeError, ValueError):
+                    pass
+        # 0.146 → 146; arredondar para evitar 999 por floats
+        return int(round(total * 1000))
+
+    @staticmethod
+    def _formatar_lista_fracoes(fracoes: list[str]) -> str:
+        """Ex.: ['A','B','C'] → 'A, B e C'."""
+        if not fracoes:
+            return "—"
+        if len(fracoes) == 1:
+            return fracoes[0]
+        return ", ".join(fracoes[:-1]) + " e " + fracoes[-1]
+
+    def _on_admin_ant_changed(self, index: int):
+        data = self.combo_admin_ant.itemData(index)
+        if not data:
+            self.edit_fracao_ant.clear()
+            return
+        self.edit_fracao_ant.setText(str(data.get("FRACAO") or ""))
 
     def _on_novo_admin_changed(self, index: int):
         data = self.combo_novo_admin.itemData(index)
@@ -1008,14 +1254,18 @@ class DocsWidget(QWidget):
             self.edit_fracao.clear()
             self.edit_andar.clear()
             self.edit_cc.clear()
+            self._marcar_campo(self.edit_cc, True, "")
             self.edit_cc_val.clear()
             self.edit_nif.clear()
+            self._marcar_campo(self.edit_nif, True, "")
             return
         self.edit_fracao.setText(str(data.get("FRACAO") or ""))
         self.edit_andar.setText(str(data.get("ANDAR") or ""))
-        self.edit_cc.setText(str(data.get("CC_NUMERO") or ""))
-        self.edit_cc_val.setText(str(data.get("CC_VALIDADE") or ""))
-        self.edit_nif.setText(str(data.get("NIF") or ""))
+        self.edit_cc.setText(formatar_cc(str(data.get("CC_NUMERO") or ""))[0])
+        self._formatar_cc()
+        self.edit_cc_val.setText(formatar_data_ddmmaaaa(str(data.get("CC_VALIDADE") or "")))
+        self.edit_nif.setText(formatar_nif(str(data.get("NIF") or ""))[0])
+        self._formatar_nif()
 
     def _recolher_dados_form(self) -> dict:
         qd = self.date_edit.date()
@@ -1023,14 +1273,17 @@ class DocsWidget(QWidget):
         ti = self.time_ini.time()
         tf = self.time_fim.time()
 
-        nome_novo = ""
-        data_combo = self.combo_novo_admin.currentData()
-        if data_combo:
-            nome_novo = data_combo.get("NOME") or ""
-        else:
-            txt = self.combo_novo_admin.currentText().strip()
+        def _nome_combo(combo: QComboBox) -> str:
+            data = combo.currentData()
+            if data:
+                return data.get("NOME") or ""
+            txt = combo.currentText().strip()
             if txt and not txt.startswith("—"):
-                nome_novo = txt
+                return txt
+            return ""
+
+        fracoes = self._fracoes_presentes()
+        perm = self._permilagem_presentes()
 
         return {
             "num_adm": self.spin_num_adm.value(),
@@ -1040,15 +1293,19 @@ class DocsWidget(QWidget):
             "data": data_py,
             "hora_inicial": time(ti.hour(), ti.minute()),
             "hora_final": time(tf.hour(), tf.minute()),
-            "admin_ant": self.edit_admin_ant.text().strip(),
+            "admin_ant": _nome_combo(self.combo_admin_ant),
             "fracao_ant": self.edit_fracao_ant.text().strip(),
-            "administrador": nome_novo,
+            "administrador": _nome_combo(self.combo_novo_admin),
             "fracao": self.edit_fracao.text().strip(),
             "andar": self.edit_andar.text().strip(),
             "cc_numero": self.edit_cc.text().strip(),
             "cc_validade": self.edit_cc_val.text().strip(),
             "nif": self.edit_nif.text().strip(),
             "assuntos_gerais": self.txt_assuntos.toPlainText().strip(),
+            "fracoes_presentes": fracoes,
+            "fracoes_presentes_txt": self._formatar_lista_fracoes(fracoes),
+            "permilagem_presentes": perm,
+            "condominos": getattr(self, "_condominos_cache", None) or [],
         }
 
     def gerar_ata_clicked(self):
@@ -1070,13 +1327,19 @@ class DocsWidget(QWidget):
         if not dados.get("admin_ant"):
             QMessageBox.warning(
                 self, "Dados em falta",
-                "Indique o nome do administrador cessante (em exercício)."
+                "Selecione o administrador cessante (em exercício)."
             )
             return
         if not dados.get("administrador"):
             QMessageBox.warning(
                 self, "Dados em falta",
                 "Selecione o novo administrador."
+            )
+            return
+        if not dados.get("fracoes_presentes"):
+            QMessageBox.warning(
+                self, "Presenças em falta",
+                "Selecione pelo menos uma fração presente na reunião."
             )
             return
 

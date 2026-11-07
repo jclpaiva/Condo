@@ -271,6 +271,15 @@ def backup_arquivos_db(bancos_db='Bancos'):
         print(f"    ✗ Erro ao copiar condominio.db: {e}")
         return False
 
+    # Cópia da proposta de quotas (se existir) para auditoria no historico
+    quotas_json = Path(work_dir) / 'quotas_aprovadas.json'
+    if quotas_json.is_file():
+        try:
+            shutil.copy2(str(quotas_json), str(backup_dir / 'quotas_aprovadas.json'))
+            print(f"    ✓ quotas_aprovadas.json")
+        except Exception as e:
+            print(f"    ⚠️ quotas_aprovadas.json não copiado: {e}")
+
     return True
 
 def obter_saldos_finais(saldos_db='Saldos'):
@@ -811,6 +820,16 @@ def fim_ano_e_transfere_saldo(pasta_dados='corrente', validar_pos_commit=True):
                 print(f"  ⚠️ Configs não encontrado em {configs_db} — ANO_EXERCICIO não atualizado")
 
             print(f"\n  ✓ Todas as operações concluídas — a fazer COMMIT...")
+
+        # 5b. Aplicar quotas aprovadas (orçamento) ao novo exercício
+        #     (após COMMIT: historico já tem as quotas antigas no backup)
+        print(f"\n5b. Aplicar quotas aprovadas (orçamento)...")
+        try:
+            from Orcamento import aplicar_quotas_aprovadas
+            ok_q, msg_q = aplicar_quotas_aprovadas(pasta_trabalho, novo_ano=novo_ano)
+            print(f"  {'✓' if ok_q else '⚠️'} {msg_q}")
+        except Exception as exc_q:
+            print(f"  ⚠️ Falha ao aplicar quotas aprovadas: {exc_q}")
 
         # 6. Validação de consistência (após commit, leitura fresca) — opcional
         avisos = []

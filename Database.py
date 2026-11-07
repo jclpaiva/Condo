@@ -113,8 +113,7 @@ CREATE TABLE IF NOT EXISTS condominos (
     telemovel       TEXT,
     email           TEXT,
     permilagem      REAL    DEFAULT 0,
-    quota_normal    REAL    NOT NULL DEFAULT 0,
-    quota_extra     REAL    NOT NULL DEFAULT 0,
+    -- quotas: tabela fracoes (quota_normal / quota_extra) — não aqui
     foto            TEXT,
     ativo           INTEGER NOT NULL DEFAULT 1,       -- 1 = recebe emails
     admin           INTEGER NOT NULL DEFAULT 0,
@@ -126,21 +125,23 @@ CREATE TABLE IF NOT EXISTS condominos (
 );
 
 -- ============================================================
---  Frações (andar e permilagem de cada fração)
+--  Frações (estrutura + quotas mensais — fonte de verdade €)
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS fracoes (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    fracao      TEXT    NOT NULL UNIQUE,
-    andar       TEXT    NOT NULL,
-    permilagem  REAL    NOT NULL,
-    created_at  TEXT    DEFAULT (datetime('now'))
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    fracao        TEXT    NOT NULL UNIQUE,
+    andar         TEXT    NOT NULL,
+    permilagem    REAL    NOT NULL,
+    quota_normal  REAL    NOT NULL DEFAULT 0,
+    quota_extra   REAL    NOT NULL DEFAULT 0,
+    created_at    TEXT    DEFAULT (datetime('now'))
 );
 
 -- ============================================================
 --  Regras de classificação V5
 --  Tabela única: absorve Configs.REGRA_* + COND_* + tabela contas
---  normal/extra preenchidos = regra de condómino
+--  normal/extra preenchidos = legado regra de condómino (preferir fracoes)
 --  normal/extra vazios      = regra geral (despesa/receita)
 -- ============================================================
 
@@ -150,8 +151,8 @@ CREATE TABLE IF NOT EXISTS regras (
     classe      TEXT    NOT NULL CHECK (classe IN ('RECEITA', 'DESPESA')),
     conta       TEXT    NOT NULL,              -- nome da conta contabilística (texto livre)
     pattern     TEXT    NOT NULL,              -- texto a procurar na descrição do CSV
-    normal      REAL,                          -- quota normal (só condóminos)
-    extra       REAL,                          -- quota extra  (só condóminos)
+    normal      REAL,                          -- legado (não é fonte de verdade das quotas)
+    extra       REAL,                          -- legado
     ativo       INTEGER NOT NULL DEFAULT 1,
     created_at  TEXT    DEFAULT (datetime('now')),
     UNIQUE (pattern, normal, extra)
@@ -289,7 +290,11 @@ CREATE TABLE IF NOT EXISTS juros (
 """
 
 def create_schema(pasta: Path | None = None) -> None:
-    """Cria (ou actualiza) o schema completo."""
+    """Cria tabelas em falta (CREATE IF NOT EXISTS). Não migra dados nem DROP de colunas.
+
+    Alterações estruturais V2→V3 (quotas em fracoes, remover de condominos)
+    fazem-se com o script ``migrar_2_v3.py``.
+    """
     with get_connection(pasta, row_factory=False) as conn:
         conn.executescript(SCHEMA_SQL)
         _ensure_condominos_cc_columns(conn)
@@ -311,9 +316,6 @@ def _ensure_condominos_cc_columns(conn) -> None:
         if col not in existentes:
             conn.execute(f"ALTER TABLE condominos ADD COLUMN {col} {tipo}")
 
-# ---------------------------------------------------------------------------
-# Helpers de conversão de tipos
-# ---------------------------------------------------------------------------
 
 def _to_float(val: Any) -> float:
     if val is None or val == "":
@@ -404,9 +406,10 @@ class CondominosRepo(BaseRepo):
     table = "condominos"
 
     # Colunas permitidas em INSERT/UPDATE (whitelist contra SQL injection por nomes)
+    # quota_* não existem em condominos (fonte = fracoes)
     _ALLOWED_COLS = frozenset({
         "fracao", "andar", "nome", "morada", "cpostal", "cidade",
-        "telemovel", "email", "permilagem", "quota_normal", "quota_extra",
+        "telemovel", "email", "permilagem",
         "foto", "ativo", "admin",
         "cc_numero", "cc_validade", "nif",
     })
@@ -484,30 +487,52 @@ class FracoesRepo(BaseRepo):
     table = "fracoes"
 
     _CREATE = """CREATE TABLE IF NOT EXISTS fracoes (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        fracao      TEXT    NOT NULL UNIQUE,
-        andar       TEXT    NOT NULL,
-        permilagem  REAL    NOT NULL,
-        created_at  TEXT    DEFAULT (datetime('now'))
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        fracao        TEXT    NOT NULL UNIQUE,
+        andar         TEXT    NOT NULL,
+        permilagem    REAL    NOT NULL,
+        quota_normal  REAL    NOT NULL DEFAULT 0,
+        quota_extra   REAL    NOT NULL DEFAULT 0,
+        created_at    TEXT    DEFAULT (datetime('now'))
     )"""
 
     def all_ordered(self) -> list[sqlite3.Row]:
-        """Todas as frações ordenadas por fração."""
+        """Todas as frações ordenadas por fração (com quotas se a coluna existir)."""
         with self._conn() as conn:
-            return conn.execute(
-                "SELECT id, fracao, andar, permilagem FROM fracoes "
-                "ORDER BY fracao, id"
-            ).fetchall()
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(fracoes)").fetchall()}
+            if "quota_normal" in cols:
+                sql = (
+                    "SELECT id, fracao, andar, permilagem, "
+                    "COALESCE(quota_normal,0) AS quota_normal, "
+                    "COALESCE(quota_extra,0) AS quota_extra "
+                    "FROM fracoes ORDER BY fracao, id"
+                )
+            else:
+                sql = (
+                    "SELECT id, fracao, andar, permilagem FROM fracoes "
+                    "ORDER BY fracao, id"
+                )
+            return conn.execute(sql).fetchall()
 
     def replace_all(self, rows: Sequence[dict]) -> int:
         """Substitui todas as frações (usado pela GUI de Configurações).
 
         Aceita chaves em minúsculas ou como na grelha (Fração/Andar/Permilagem).
-        Ignora linhas sem fração ou andar e frações repetidas (fica a 1ª).
+        Preserva quota_normal/extra se vierem no dict; senão 0.
         Devolve o número de registos gravados.
         """
         with self._conn() as conn:
             conn.execute(self._CREATE)
+            # garantir colunas em BD antiga ainda não migrada
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(fracoes)").fetchall()}
+            for col in ("quota_normal", "quota_extra"):
+                if col not in cols:
+                    try:
+                        conn.execute(
+                            f"ALTER TABLE fracoes ADD COLUMN {col} REAL NOT NULL DEFAULT 0"
+                        )
+                    except Exception:
+                        pass
             conn.execute("DELETE FROM fracoes")
             vistas: set[str] = set()
             n = 0
@@ -523,9 +548,20 @@ class FracoesRepo(BaseRepo):
                     perm = float(str(perm).replace(",", ".")) if perm not in (None, "") else 0.0
                 except ValueError:
                     perm = 0.0
+                qn = r.get("quota_normal", r.get("Quota Normal", r.get("QUOTAN", 0)))
+                qe = r.get("quota_extra", r.get("Quota Extra", r.get("QUOTAE", 0)))
+                try:
+                    qn = float(str(qn).replace(",", ".")) if qn not in (None, "") else 0.0
+                except ValueError:
+                    qn = 0.0
+                try:
+                    qe = float(str(qe).replace(",", ".")) if qe not in (None, "") else 0.0
+                except ValueError:
+                    qe = 0.0
                 conn.execute(
-                    "INSERT INTO fracoes (fracao, andar, permilagem) VALUES (?,?,?)",
-                    (fracao, andar, perm),
+                    "INSERT INTO fracoes (fracao, andar, permilagem, quota_normal, quota_extra) "
+                    "VALUES (?,?,?,?,?)",
+                    (fracao, andar, perm, qn, qe),
                 )
                 vistas.add(fracao)
                 n += 1
@@ -877,38 +913,140 @@ def is_regra_condomino(
         or "frac" in conta_l
     )
 
+def quotas_em_vigor(fracao: str, data: str | None = None, pasta=None) -> dict:
+    """
+    Quotas da fração (fonte: tabela ``fracoes``).
+
+    O parâmetro ``data`` é ignorado (histórico fica em historico/YYYY).
+    Aceita letra (A) ou rótulo de andar.
+    """
+    pasta = resolver_pasta(pasta)
+    vazio = {
+        "QUOTA_NORMAL": 0.0, "QUOTA_EXTRA": 0.0, "QUOTA_TOTAL": 0.0,
+        "FRACAO": (fracao or "").strip().upper(), "VIGENCIA_DE": None,
+    }
+    if not db_path(pasta).exists():
+        return vazio
+
+    fr = (fracao or "").strip().upper()
+    if not fr:
+        return vazio
+
+    letra_para_label, label_para_letra = _mapas_fracoes_db(pasta)
+    if fr not in letra_para_label:
+        for lab, let in label_para_letra.items():
+            if lab.upper() == fr:
+                fr = let
+                break
+
+    try:
+        with get_connection(pasta) as conn:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(fracoes)").fetchall()}
+            if "quota_normal" not in cols:
+                return vazio
+            row = conn.execute(
+                """
+                SELECT fracao, quota_normal, quota_extra
+                  FROM fracoes
+                 WHERE UPPER(fracao) = ?
+                 LIMIT 1
+                """,
+                (fr,),
+            ).fetchone()
+    except Exception as exc:
+        print(f"⚠️ quotas_em_vigor({fr!r}): {exc}")
+        return vazio
+
+    if row is None:
+        return vazio
+    try:
+        qn = float(row["quota_normal"] or 0)
+    except (TypeError, ValueError):
+        qn = 0.0
+    try:
+        qe = float(row["quota_extra"] or 0)
+    except (TypeError, ValueError):
+        qe = 0.0
+    return {
+        "QUOTA_NORMAL": qn,
+        "QUOTA_EXTRA": qe,
+        "QUOTA_TOTAL": round(qn + qe, 2),
+        "FRACAO": (row["fracao"] or fr).strip().upper(),
+        "VIGENCIA_DE": None,
+    }
+
+
+def guardar_quota_fracao(
+    fracao: str,
+    quota_normal: float,
+    quota_extra: float,
+    *,
+    vigencia_de: str | None = None,
+    origem: str = "manual",
+    pasta=None,
+) -> bool:
+    """
+    Actualiza quota_normal / quota_extra na tabela ``fracoes``.
+    ``vigencia_de`` e ``origem`` são ignorados (API estável para a UI).
+    """
+    pasta = resolver_pasta(pasta)
+    fr = (fracao or "").strip().upper()
+    if not fr:
+        return False
+    try:
+        with get_connection(pasta, row_factory=False) as conn:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(fracoes)").fetchall()}
+            if "quota_normal" not in cols:
+                print("⚠️ fracoes sem colunas de quota — execute migrar_2_v3.py")
+                return False
+            cur = conn.execute(
+                """
+                UPDATE fracoes
+                   SET quota_normal = ?, quota_extra = ?
+                 WHERE UPPER(fracao) = ?
+                """,
+                (float(quota_normal or 0), float(quota_extra or 0), fr),
+            )
+            if cur.rowcount == 0:
+                print(f"⚠️ guardar_quota_fracao: fração {fr!r} não existe em fracoes")
+                return False
+        return True
+    except Exception as exc:
+        print(f"⚠️ guardar_quota_fracao({fr!r}): {exc}")
+        return False
+
+
 def quotas_por_fracao(pasta=None) -> dict:
     """
-    Quotas por rótulo de fracção/andar a partir da tabela ``condominos``.
+    Quotas por rótulo de fracção/andar (chave = andar quando existe).
 
-    Fonte: ``quota_normal`` / ``quota_extra`` (não a tabela ``regras``).
-
-    Returns:
-        dict[str, dict]: {
-            "R/c Esq.": {"QUOTA_NORMAL": 18.0, "QUOTA_EXTRA": 46.0, "QUOTA_TOTAL": 64.0},
-            ...
-        }
+    Fonte: tabela ``fracoes`` (quota_normal / quota_extra).
     """
     pasta = resolver_pasta(pasta)
     if not db_path(pasta).exists():
         return {}
 
     out: dict = {}
+    letra_para_label, _ = _mapas_fracoes_db(pasta)
     try:
         with get_connection(pasta) as conn:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(fracoes)").fetchall()}
+            if "quota_normal" not in cols:
+                return {}
             rows = conn.execute(
                 """
                 SELECT fracao, andar, quota_normal, quota_extra
-                FROM condominos
-                ORDER BY fracao, id
+                  FROM fracoes
+                 ORDER BY fracao
                 """
             ).fetchall()
     except Exception as exc:
         print(f"⚠️ quotas_por_fracao: {exc}")
         return {}
 
-    letra_para_label, _ = _mapas_fracoes_db(pasta)
     for r in rows:
+        fr = (r["fracao"] or "").strip().upper()
+        andar = (r["andar"] or "").strip()
         try:
             qn = float(r["quota_normal"] or 0)
         except (TypeError, ValueError):
@@ -917,22 +1055,22 @@ def quotas_por_fracao(pasta=None) -> dict:
             qe = float(r["quota_extra"] or 0)
         except (TypeError, ValueError):
             qe = 0.0
-        andar = (r["andar"] or "").strip()
-        fracao = (r["fracao"] or "").strip()
-        if andar:
-            key = andar
-        elif fracao and fracao.upper() in letra_para_label:
-            key = letra_para_label[fracao.upper()]
-        else:
-            key = fracao
-        if not key or key in out:
-            continue
-        out[key] = {
+        vals = {
             "QUOTA_NORMAL": qn,
             "QUOTA_EXTRA": qe,
             "QUOTA_TOTAL": round(qn + qe, 2),
         }
+        # Chave canónica = rótulo de andar (como na V2).
+        # NÃO indexar pela letra (A, B, …): match_fracao faz substring e
+        # "A" casa dentro de "QUOTA", atribuindo todos os pagamentos à fração A.
+        if andar:
+            out[andar] = vals
+        elif fr:
+            out[fr] = vals
+        elif fr in letra_para_label:
+            out[letra_para_label[fr]] = vals
     return out
+
 
 def condominos_para_categorizacao(pasta=None) -> list[dict]:
     """
@@ -940,8 +1078,8 @@ def condominos_para_categorizacao(pasta=None) -> list[dict]:
 
     - **Match (nome no extracto):** padrões da tabela ``regras`` (como antes)
       + nome da ficha ``condominos``.
-    - **Valores de quota:** SEMPRE ``condominos.quota_normal`` /
-      ``condominos.quota_extra`` — nunca ``regras.normal/extra``.
+    - **Valores de quota:** tabela ``fracoes`` via ``quotas_em_vigor``
+      (nunca ``regras.normal/extra`` nem colunas de condominos).
 
     Cada item: PREFIXO, NOME, NOME_ALTERNATIVO, VALOR_NORMAL, VALOR_EXTRA,
                VALOR_TOTAL, CONTA
@@ -949,6 +1087,8 @@ def condominos_para_categorizacao(pasta=None) -> list[dict]:
     pasta = resolver_pasta(pasta)
     if not db_path(pasta).exists():
         return []
+
+    create_schema(pasta)
 
     try:
         from Commons import remover_acentos
@@ -960,14 +1100,14 @@ def condominos_para_categorizacao(pasta=None) -> list[dict]:
         s = remover_acentos((s or "").strip()).upper()
         return " ".join(s.split())
 
-    # ── 1. Quotas a partir de condominos (fonte única dos valores) ───────────
+    # ── 1. Condóminos + quotas em vigor (fracoes) ─────────────────────
     por_fracao: dict[str, dict] = {}
     por_andar: dict[str, dict] = {}
     try:
         with get_connection(pasta) as conn:
             rows_co = conn.execute(
                 """
-                SELECT fracao, andar, nome, quota_normal, quota_extra
+                SELECT fracao, andar, nome
                 FROM condominos
                 ORDER BY fracao, id
                 """
@@ -979,27 +1119,23 @@ def condominos_para_categorizacao(pasta=None) -> list[dict]:
     letra_para_label, label_para_letra = _mapas_fracoes_db(pasta)
 
     for r in rows_co:
-        try:
-            qn = float(r["quota_normal"] or 0)
-        except (TypeError, ValueError):
-            qn = 0.0
-        try:
-            qe = float(r["quota_extra"] or 0)
-        except (TypeError, ValueError):
-            qe = 0.0
-        if qn <= 0 and qe <= 0:
-            nome = (r["nome"] or "").strip() or "?"
-            print(
-                f"  ⚠️ Condómino '{nome}' sem QUOTAN/QUOTAE na ficha "
-                f"— não será usado na categorização"
-            )
-            continue
-
         fracao = (r["fracao"] or "").strip().upper()
         andar = (r["andar"] or "").strip()
         if not andar and fracao in letra_para_label:
             andar = letra_para_label[fracao]
         nome = (r["nome"] or "").strip()
+        q = quotas_em_vigor(fracao, pasta=pasta) if fracao else {
+            "QUOTA_NORMAL": 0.0, "QUOTA_EXTRA": 0.0,
+        }
+        qn = float(q.get("QUOTA_NORMAL") or 0)
+        qe = float(q.get("QUOTA_EXTRA") or 0)
+        if qn <= 0 and qe <= 0:
+            print(
+                f"  ⚠️ Condómino '{nome or '?'}' (fração {fracao or '?'}) "
+                f"sem quotas em fracoes — não será usado na categorização"
+            )
+            continue
+
         info = {
             "fracao": fracao,
             "andar": andar,
@@ -1016,7 +1152,7 @@ def condominos_para_categorizacao(pasta=None) -> list[dict]:
             por_andar.setdefault(and_key, info)
 
     if not por_fracao and not por_andar:
-        print("  ⚠️ Nenhum condómino com quotas na tabela condominos")
+        print("  ⚠️ Nenhuma fração com quotas em fracoes")
         return []
 
     def _resolver_info(conta: str, pattern: str) -> dict | None:
@@ -1466,13 +1602,16 @@ GROUP BY fonte, tipo;
 CREATE VIEW IF NOT EXISTS v_quotas_por_condomino AS
 SELECT
   co.id AS condominio_id, co.fracao, co.nome,
-  co.quota_normal, co.quota_extra, r.ano,
+  COALESCE(f.quota_normal, 0) AS quota_normal,
+  COALESCE(f.quota_extra, 0) AS quota_extra,
+  r.ano,
   COALESCE(SUM(CASE WHEN r.tipo_quota='NORMAL' THEN r.valor END), 0) AS pago_normal,
   COALESCE(SUM(CASE WHEN r.tipo_quota='EXTRA' THEN r.valor END), 0) AS pago_extra,
   COALESCE(SUM(r.valor), 0) AS pago_total
 FROM condominos co
+LEFT JOIN fracoes f ON UPPER(f.fracao) = UPPER(co.fracao)
 LEFT JOIN receitas_mensais r ON r.condominio_id = co.id
-GROUP BY co.id, co.fracao, co.nome, co.quota_normal, co.quota_extra, r.ano;
+GROUP BY co.id, co.fracao, co.nome, f.quota_normal, f.quota_extra, r.ano;
 """
 
 def ensure_views_and_fts(pasta: Path | None = None) -> None:
@@ -2113,6 +2252,10 @@ def _carregar_condominos_relacional(pasta: Path):
         rows_rel = CondominosRepo(pasta).all()
         out = []
         for r in rows_rel:
+            fracao = r["fracao"] or ""
+            q = quotas_em_vigor(fracao, pasta=pasta) if fracao else {
+                "QUOTA_NORMAL": 0.0, "QUOTA_EXTRA": 0.0,
+            }
             out.append({
                 "ID": r["id"],
                 "NOME": r["nome"] or "",
@@ -2122,11 +2265,12 @@ def _carregar_condominos_relacional(pasta: Path):
                 "CIDADE": r["cidade"] or "",
                 "TELEMOVEL": r["telemovel"] or "",
                 "EMAIL": r["email"] or "",
-                "FRACAO": r["fracao"] or "",
+                "FRACAO": fracao,
                 "ANDAR": r["andar"] or "",
                 "PERMILAGEM": r["permilagem"] if r["permilagem"] is not None else 0.0,
-                "QUOTAN": r["quota_normal"] if r["quota_normal"] is not None else 0.0,
-                "QUOTAE": r["quota_extra"] if r["quota_extra"] is not None else 0.0,
+                # Só leitura: valores vêm de fracoes (não de condominos)
+                "QUOTAN": float(q.get("QUOTA_NORMAL") or 0),
+                "QUOTAE": float(q.get("QUOTA_EXTRA") or 0),
                 "FOTO": r["foto"] or "",
                 # admin: 1 = atual, -1 = cessante (ex-admin), 0 = restante
                 "ADMIN": int(r["admin"] or 0),
@@ -2176,8 +2320,7 @@ def _salvar_condominos_relacional(df, pasta: Path) -> bool:
                 "email": str(d.get("EMAIL") or "").strip(),
                 "andar": str(d.get("ANDAR") or "").strip(),
                 "permilagem": _to_float(d.get("PERMILAGEM", 0)),
-                "quota_normal": _to_float(d.get("QUOTAN", 0)),
-                "quota_extra": _to_float(d.get("QUOTAE", 0)),
+                # quotas NÃO se gravam em condominos (fonte = fracoes)
                 "foto": str(d.get("FOTO") or "").strip(),
                 "ativo": 1 if check_val in (True, 1, "1", ".T.", "T", "t", "True") else 0,
                 # admin: 1 = atual, -1 = cessante, 0 = outros

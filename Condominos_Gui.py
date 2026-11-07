@@ -1222,6 +1222,8 @@ class CondominosTableModel(QAbstractTableModel):
         elif role == Qt.ItemDataRole.ForegroundRole:
             if col == 0:  # NOME
                 return QBrush(QColor("#1976d2"))
+            if col in (7, 8):  # quotas só leitura (fracoes)
+                return QBrush(QColor("#555555"))
         
         return QVariant()
     
@@ -1229,11 +1231,12 @@ class CondominosTableModel(QAbstractTableModel):
         if not index.isValid():
             return Qt.ItemFlag.NoItemFlags
         
-        # ANDAR (col 5) e PERMILAGEM (col 6) são derivados da FRACAO (read-only).
-        # CC (col 9) abre diálogo próprio. FRACAO (col 4) é editável via ComboBox.
+        # ANDAR (5) e PERMILAGEM (6): derivados da FRACAO (read-only).
+        # QUOTAN (7) e QUOTAE (8): só leitura — valores vêm da tabela fracoes.
+        # CC (9) abre diálogo próprio. FRACAO (4) é editável via ComboBox.
         col = index.column()
         base = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-        if col in (5, 6, 9):  # ANDAR, PERMILAGEM, CC
+        if col in (5, 6, 7, 8, 9):  # ANDAR, PERMILAGEM, QUOTAN, QUOTAE, CC
             return base
         return base | Qt.ItemFlag.ItemIsEditable
     
@@ -1248,6 +1251,9 @@ class CondominosTableModel(QAbstractTableModel):
         key = self._fields[index.column()]
         # CC é só UI (abre diálogo próprio) — nunca se escreve diretamente.
         if key == 'CC':
+            return False
+        # Quotas: só leitura na grelha (fonte = tabela fracoes)
+        if key in ('QUOTAN', 'QUOTAE'):
             return False
         row_dict = self._data[row]
 
@@ -1278,7 +1284,7 @@ class CondominosTableModel(QAbstractTableModel):
 
         # FRACAO é a chave canónica → derivar ANDAR + PERMILAGEM + quotas
         # (quotas: copia se fração/andar já existir; senão proporção pela permilagem).
-        # QUOTAN/QUOTAE continuam editáveis manualmente na grelha.
+        # QUOTAN/QUOTAE são só leitura (carregados de fracoes via carregar_condominos).
         if key == 'FRACAO':
             actualizadas = sincronizar_por_fracao(
                 row_dict, value, self._fracoes_por_fracao,
@@ -1931,11 +1937,11 @@ class CondominosWidget(QWidget):
             QMessageBox.information(
                 self, "Sucesso",
                 "<b>Alterações guardadas</b><br><br>"
-                "Quotas (Normal/Extra) sincronizadas na tabela <b>regras</b>."
+                "Quota N / Quota E são lidas da tabela <b>frações</b> (editar em Configurações → Frações)."
             )
 
             self.carregar_tabela()
-            self.status_bar.showMessage("✅ Guardado — quotas sincronizadas em regras.")
+            self.status_bar.showMessage("✅ Guardado.")
         except ValueError as ve:
             QMessageBox.warning(self, "Validação falhou", str(ve))
         except Exception as e:
