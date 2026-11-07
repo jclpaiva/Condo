@@ -1,0 +1,526 @@
+2026-11-06 13:33:54 | INFO     | 
+📋 Quotas lidas da tabela condominos:
+2026-11-06 13:33:54 | INFO     |   ✓ Match 'LUIS MIGUEL' → 1º Dto.: Normal=18.00 Extra=45.00 (tabela condominos)
+2026-11-06 13:33:54 | INFO     |   ✓ Match 'JOAO PAIVA' → 1º Esq.: Normal=20.00 Extra=51.00 (tabela condominos)
+2026-11-06 13:33:54 | INFO     |   ✓ Match 'JOAO PEDRO' → 2º Dto.: Normal=24.00 Extra=61.00 (tabela condominos)
+2026-11-06 13:33:54 | INFO     |   ✓ Match 'PAULA CRISTIN' → 2º Esq.: Normal=28.00 Extra=71.00 (tabela condominos)
+2026-11-06 13:33:54 | INFO     |   ✓ Match 'ROSA MARIA' → R/c Dto.: Normal=16.00 Extra=40.00 (tabela condominos)
+2026-11-06 13:33:54 | INFO     |   ✓ Match 'JOAO MANUEL' → R/c Esq.: Normal=18.00 Extra=46.00 (tabela condominos)
+2026-11-06 13:33:54 | INFO     |   ✓ Match nome ficha 'João Manuel Teixeira da Silva' → R/c Esq.: Normal=18.00 Extra=46.00
+2026-11-06 13:33:54 | INFO     |   ✓ Match nome ficha 'Rosa Carvalhal' → R/c Dto.: Normal=16.00 Extra=40.00
+2026-11-06 13:33:54 | INFO     |   ✓ Match nome ficha 'João Carlos Lemos Paiva' → 1º Esq.: Normal=20.00 Extra=51.00
+2026-11-06 13:33:54 | INFO     |   ✓ Match nome ficha 'Luís Miguel Cardoso da Silva' → 1º Dto.: Normal=18.00 Extra=45.00
+2026-11-06 13:33:54 | INFO     |   ✓ Match nome ficha 'Paula Cristina Fernandes dos Santos' → 2º Esq.: Normal=28.00 Extra=71.00
+2026-11-06 13:33:54 | INFO     |   ✓ Match nome ficha 'João Pedro Alves' → 2º Dto.: Normal=24.00 Extra=61.00
+2026-11-06 13:33:54 | INFO     | -> Condóminos com quotas para classificar: 12
+2026-11-06 13:33:54 | INFO     | -> Regras gerais (não-quota): 14
+2026-11-06 13:33:54 | INFO     | 
+================================================================================
+2026-11-06 13:33:54 | INFO     | 🔥 IMPORTAÇÃO DE MOVIMENTOS BANCÁRIOS
+2026-11-06 13:33:54 | INFO     | ================================================================================
+2026-11-06 13:33:54 | INFO     | 
+📋 CARREGANDO PARÂMETROS DE CONFIGS...
+2026-11-06 13:33:54 | INFO     | ────────────────────────────────────────────────────────────────────────────────
+2026-11-06 13:33:54 | INFO     |   ✓  TOTAL_COLUMNS        = 7.0
+2026-11-06 13:33:54 | INFO     |   ✓  CSV_FIRST_ROW        = 11
+2026-11-06 13:33:54 | INFO     |   ✓  CSV_DELIMITER        = ;
+2026-11-06 13:33:54 | INFO     |   ✓  CSV_DECIMAL          = ,
+2026-11-06 13:33:54 | INFO     |   ✓  CSV_THOUSANDS        = .
+2026-11-06 13:33:54 | INFO     |   ✓  COL_DATA             = 0.0
+2026-11-06 13:33:54 | INFO     |   ✓  COL_DESCRICAO        = 3.0
+2026-11-06 13:33:54 | INFO     |   ✓  COL_VALOR            = 4.0
+2026-11-06 13:33:54 | INFO     |   ✓  COL_SALDO            = 6.0
+2026-11-06 13:33:54 | INFO     |   ℹ️  CSV_AUTO_DETECT      = False (Configs)
+2026-11-06 13:33:54 | INFO     |   ℹ️  COD_PAGINA           = cp1252 (Configs)
+2026-11-06 13:33:54 | INFO     | ────────────────────────────────────────────────────────────────────────────────
+2026-11-06 13:33:54 | INFO     | 
+📖 LENDO FICHEIRO CSV...
+2026-11-06 13:33:54 | INFO     |   ✓ Encoding (Configs COD_PAGINA): cp1252
+2026-11-06 13:33:54 | INFO     |   • Modo: Linha fixa (configurada em CSV_FIRST_ROW)
+2026-11-06 13:33:54 | INFO     |   ✓ Saltando 10 linhas
+2026-11-06 13:33:54 | INFO     |   ✓ 81 linhas lidas do CSV
+2026-11-06 13:33:54 | INFO     |   ✓ 8 colunas encontradas
+2026-11-06 13:33:54 | INFO     | 
+📋 EXTRAINDO COLUNAS...
+2026-11-06 13:33:54 | INFO     |   ✓ Colunas extraídas com sucesso
+2026-11-06 13:33:54 | INFO     | 
+🔄 CONVERTENDO TIPOS DE DADOS...
+2026-11-06 13:33:54 | INFO     |   ✓ 81 movimentos válidos
+2026-11-06 13:33:54 | INFO     | 
+🏷️  APLICANDO REGRAS DE CATEGORIZAÇÃO...
+2026-11-06 13:33:54 | INFO     | 
+→ Aplicando 14 regras gerais...
+2026-11-06 13:33:54 | INFO     |   ✓ 1× 'TFI COND PREDIO COVA' → DESPESA / Condomínio Garagens
+2026-11-06 13:33:54 | INFO     |   ✓ 5× 'SU ELETR' → DESPESA / Eletricidade
+2026-11-06 13:33:54 | INFO     |   ✓ 9× '114151' → DESPESA / Empregada
+2026-11-06 13:33:54 | INFO     |   ✓ 12× 'MANUT CONTA' → DESPESA / Manutencao Cgd
+2026-11-06 13:33:54 | INFO     |   ✓ 1× 'MERCADONA' → DESPESA / Produtos Limpeza
+2026-11-06 13:33:54 | INFO     |   ✓ Categorização concluída
+2026-11-06 13:33:54 | INFO     | 
+⚙️  PREPARANDO DADOS FINAIS...
+2026-11-06 13:33:54 | INFO     |   • Ano dos movimentos: 2026
+2026-11-06 13:33:54 | INFO     |   • Saldo anterior calculado: 6710.15 €
+2026-11-06 13:33:54 | INFO     |   ✓ 82 registos preparados
+2026-11-06 13:33:54 | INFO     | 
+💾 GRAVANDO MOVIMENTOS BANCÁRIOS (SQL / API canónica)...
+2026-11-06 13:33:54 | INFO     |   ✓ 82 movimentos gravados (bancos) em C:\Users\jclpa\Documents\Scripts\Bancos\corrente
+2026-11-06 13:33:54 | INFO     | 
+🔄 SINCRONIZANDO MOVIMENTOS DE POUPANÇA PARA DPRAZO...
+2026-11-06 13:33:54 | INFO     | 
+================================================================================
+2026-11-06 13:33:54 | INFO     | SINCRONIZAÇÃO DE POUPANÇA: corrente → DPrazo
+2026-11-06 13:33:54 | INFO     | ================================================================================
+2026-11-06 13:33:54 | INFO     |   📁 Bancos: C:\Users\jclpa\Documents\Scripts\Bancos\corrente
+2026-11-06 13:33:54 | INFO     |   📁 DPrazo: C:\Users\jclpa\Documents\Scripts\Bancos\DPrazo
+2026-11-06 13:33:54 | INFO     | 
+  ⚠️  DPrazo ainda não existe. Criando estrutura inicial...
+2026-11-06 13:33:54 | INFO     |   ✓ 1 movimentos gravados (dprazo) em C:\Users\jclpa\Documents\Scripts
+2026-11-06 13:33:54 | INFO     |   ✓ DPrazo criado com sucesso!
+2026-11-06 13:33:54 | INFO     | 
+📖 Lendo corrente...
+2026-11-06 13:33:54 | INFO     | 
+📊 Total processado: 82 registos em Bancos
+2026-11-06 13:33:54 | INFO     | ✅ 0 novos registos sincronizados para DPrazo
+2026-11-06 13:33:54 | INFO     | ================================================================================
+2026-11-06 13:33:54 | INFO     |   ✓ 82 registos gravados com sucesso
+2026-11-06 13:33:54 | INFO     | 
+================================================================================
+2026-11-06 13:33:54 | INFO     | ✅ IMPORTAÇÃO CONCLUÍDA COM SUCESSO
+2026-11-06 13:33:54 | INFO     | ================================================================================
+2026-11-06 13:33:54 | INFO     | 
+📊 Resumo:
+2026-11-06 13:33:54 | INFO     |   • Ficheiro CSV:         C:/Users/jclpa/Documents/Scripts/Bancos/import/comprovativo_2026.csv
+2026-11-06 13:33:54 | INFO     |   • Movimentos importados: 82
+2026-11-06 13:33:54 | INFO     |   • Destino:              C:\Users\jclpa\Documents\Scripts\Bancos\corrente
+2026-11-06 13:33:54 | INFO     | ================================================================================
+2026-11-06 13:33:59 | INFO     |   ✓ 82 movimentos gravados (bancos) em C:\Users\jclpa\Documents\Scripts\Bancos\corrente
+2026-11-06 13:34:07 | INFO     | 
+================================================================================
+2026-11-06 13:34:07 | INFO     | 🔄 PROCESSAMENTO DE RECEITAS (SQL / API canónica)
+2026-11-06 13:34:07 | INFO     | ================================================================================
+2026-11-06 13:34:07 | INFO     |   • EPS_TOLERANCE = 0.5
+2026-11-06 13:34:07 | INFO     | PASSO 1: Carregando tabela de quotas...
+2026-11-06 13:34:07 | INFO     | ✅ 6 fracções carregadas (de regras):
+2026-11-06 13:34:07 | INFO     |   - R/c Esq.: Normal=18.00, Extra=46.00
+2026-11-06 13:34:07 | INFO     |   - R/c Dto.: Normal=16.00, Extra=40.00
+2026-11-06 13:34:07 | INFO     |   - 1º Esq.: Normal=20.00, Extra=51.00
+2026-11-06 13:34:07 | INFO     |   - 1º Dto.: Normal=18.00, Extra=45.00
+2026-11-06 13:34:07 | INFO     |   - 2º Esq.: Normal=28.00, Extra=71.00
+2026-11-06 13:34:07 | INFO     |   - 2º Dto.: Normal=24.00, Extra=61.00
+2026-11-06 13:34:07 | INFO     | 
+PASSO 2: Aglutinando movimentos (bancos+caixa+dprazo)...
+2026-11-06 13:34:07 | INFO     | 
+================================================================================
+2026-11-06 13:34:07 | INFO     | 🔄 AGLUTINAÇÃO DE MOVIMENTOS (SQL / bancos+caixa+dprazo)
+2026-11-06 13:34:07 | INFO     | ================================================================================
+2026-11-06 13:34:07 | INFO     |   🧹 Removidos 2 movimentos duplicados
+2026-11-06 13:34:07 | INFO     |   ✅ bancos: 81 registos
+2026-11-06 13:34:07 | INFO     |   ✅ dprazo: 1 registos
+2026-11-06 13:34:07 | INFO     | 
+  📊 Total aglutinado: 82 movimentos únicos
+2026-11-06 13:34:07 | INFO     | ================================================================================
+2026-11-06 13:34:07 | INFO     | 
+PASSO 3: Processando receitas...
+2026-11-06 13:34:07 | INFO     | 
+================================================================================
+2026-11-06 13:34:07 | INFO     | 📊 PROCESSAMENTO SIMPLIFICADO DE RECEITAS
+2026-11-06 13:34:07 | INFO     | ================================================================================
+2026-11-06 13:34:07 | INFO     |   ✅ 53 receitas de quotas encontradas
+2026-11-06 13:34:07 | INFO     | 
+  📋 43 grupos (fracção|mês) identificados
+2026-11-06 13:34:07 | INFO     | 
+  🔍 2º Esq. | Mês 1 | Total: 1287.00
+2026-11-06 13:34:07 | INFO     |       ✅ 13x TOTAL = 13x Normal + 13x Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 1º Dto. | Mês 1 | Total: 63.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (63.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 R/c Dto. | Mês 1 | Total: 56.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (56.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 R/c Esq. | Mês 1 | Total: 64.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (64.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 1º Dto. | Mês 2 | Total: 63.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (63.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 R/c Esq. | Mês 2 | Total: 64.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (64.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 R/c Dto. | Mês 2 | Total: 56.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (56.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 2º Esq. | Mês 2 | Total: 99.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (99.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 1º Dto. | Mês 3 | Total: 63.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (63.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 R/c Dto. | Mês 3 | Total: 56.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (56.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 R/c Esq. | Mês 3 | Total: 64.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (64.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 2º Esq. | Mês 3 | Total: 99.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (99.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 1º Dto. | Mês 4 | Total: 63.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (63.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 2º Dto. | Mês 4 | Total: 340.00
+2026-11-06 13:34:07 | INFO     |       ✅ 4x TOTAL = 4x Normal + 4x Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 R/c Esq. | Mês 4 | Total: 64.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (64.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 R/c Dto. | Mês 4 | Total: 56.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (56.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 2º Esq. | Mês 4 | Total: 99.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (99.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 1º Dto. | Mês 5 | Total: 63.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (63.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 R/c Dto. | Mês 5 | Total: 56.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (56.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 R/c Esq. | Mês 5 | Total: 64.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (64.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 2º Esq. | Mês 5 | Total: 99.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (99.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 1º Dto. | Mês 6 | Total: 63.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (63.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 R/c Esq. | Mês 6 | Total: 64.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (64.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 2º Dto. | Mês 6 | Total: 170.00
+2026-11-06 13:34:07 | INFO     |       ✅ 2x TOTAL = 2x Normal + 2x Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 2º Esq. | Mês 6 | Total: 99.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (99.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 1º Dto. | Mês 7 | Total: 63.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (63.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 R/c Esq. | Mês 7 | Total: 64.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (64.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 1º Esq. | Mês 7 | Total: 426.00
+2026-11-06 13:34:07 | INFO     |       ✅ 6x TOTAL = 6x Normal + 6x Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 R/c Dto. | Mês 7 | Total: 56.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (56.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 2º Esq. | Mês 7 | Total: 99.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (99.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 1º Dto. | Mês 8 | Total: 63.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (63.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 R/c Dto. | Mês 8 | Total: 56.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (56.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 R/c Esq. | Mês 8 | Total: 64.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (64.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 2º Esq. | Mês 8 | Total: 99.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (99.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 1º Dto. | Mês 9 | Total: 63.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (63.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 2º Dto. | Mês 9 | Total: 255.00
+2026-11-06 13:34:07 | INFO     |       ✅ 3x TOTAL = 3x Normal + 3x Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 R/c Esq. | Mês 9 | Total: 64.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (64.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 R/c Dto. | Mês 9 | Total: 56.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (56.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 2º Esq. | Mês 9 | Total: 99.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (99.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 1º Dto. | Mês 10 | Total: 63.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (63.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 R/c Esq. | Mês 10 | Total: 64.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (64.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 2º Dto. | Mês 10 | Total: 85.00
+2026-11-06 13:34:07 | INFO     |       ✅ TOTAL (85.00) = Normal + Extra
+2026-11-06 13:34:07 | INFO     | 
+  🔍 R/c Dto. | Mês 10 | Total: 112.00
+2026-11-06 13:34:07 | INFO     |       ✅ 2x TOTAL = 2x Normal + 2x Extra
+2026-11-06 13:34:07 | INFO     | 
+================================================================================
+2026-11-06 13:34:07 | INFO     | ✅ PROCESSAMENTO CONCLUÍDO
+2026-11-06 13:34:07 | INFO     | ================================================================================
+2026-11-06 13:34:07 | INFO     | 
+PASSO 4: Gerando tabelas de receitas...
+2026-11-06 13:34:07 | INFO     | 
+================================================================================
+2026-11-06 13:34:07 | INFO     | 💾 GERANDO: QUOTAS NORMAIS
+2026-11-06 13:34:07 | INFO     | ================================================================================
+2026-11-06 13:34:07 | INFO     |   ✓ SALDO_ANT lido de receitas_resumo: 1 fracções
+2026-11-06 13:34:07 | INFO     |   ✅ 1º Dto.: Pago=180.00, Saldo=-36.00
+2026-11-06 13:34:07 | INFO     |   ✅ 1º Esq.: Pago=120.00, Saldo=-120.00
+2026-11-06 13:34:07 | INFO     |   ✅ 2º Dto.: Pago=240.00, Saldo=-48.00
+2026-11-06 13:34:07 | INFO     |   ✅ 2º Esq.: Pago=588.00, Saldo=-84.00
+2026-11-06 13:34:07 | INFO     |   ✅ R/c Dto.: Pago=160.00, Saldo=-32.00
+2026-11-06 13:34:07 | INFO     |   ✅ R/c Esq.: Pago=180.00, Saldo=-36.00
+2026-11-06 13:34:07 | INFO     | 
+  📊 TOTAIS: Pago=1468.00, Saldo=-356.00
+2026-11-06 13:34:07 | INFO     |   ✅ Gravado (SQL wide): C:\Users\jclpa\Documents\Scripts\Bancos\corrente / NORMAL
+2026-11-06 13:34:07 | INFO     |   ✓ receitas_resumo sincronizado (NORMAL, ano=2026)
+2026-11-06 13:34:07 | INFO     | 
+================================================================================
+2026-11-06 13:34:07 | INFO     | 💾 GERANDO: QUOTAS EXTRAS
+2026-11-06 13:34:07 | INFO     | ================================================================================
+2026-11-06 13:34:07 | INFO     |   ✓ SALDO_ANT lido de receitas_resumo: 1 fracções
+2026-11-06 13:34:07 | INFO     |   ✅ 1º Dto.: Pago=450.00, Saldo=-90.00
+2026-11-06 13:34:07 | INFO     |   ✅ 1º Esq.: Pago=306.00, Saldo=-306.00
+2026-11-06 13:34:07 | INFO     |   ✅ 2º Dto.: Pago=610.00, Saldo=-122.00
+2026-11-06 13:34:07 | INFO     |   ✅ 2º Esq.: Pago=1491.00, Saldo=-213.00
+2026-11-06 13:34:07 | INFO     |   ✅ R/c Dto.: Pago=400.00, Saldo=-80.00
+2026-11-06 13:34:07 | INFO     |   ✅ R/c Esq.: Pago=460.00, Saldo=-92.00
+2026-11-06 13:34:07 | INFO     | 
+  📊 TOTAIS: Pago=3717.00, Saldo=-903.00
+2026-11-06 13:34:07 | INFO     |   ✅ Gravado (SQL wide): C:\Users\jclpa\Documents\Scripts\Bancos\corrente / EXTRA
+2026-11-06 13:34:07 | INFO     |   ✓ receitas_resumo sincronizado (EXTRA, ano=2026)
+2026-11-06 13:34:07 | INFO     | 
+PASSO 5: Gerando Juros...
+2026-11-06 13:34:07 | INFO     | 
+================================================================================
+2026-11-06 13:34:07 | INFO     | 💰 GERANDO RECEITAS DE JUROS
+2026-11-06 13:34:07 | INFO     | ================================================================================
+2026-11-06 13:34:07 | INFO     |   ✅ 0 registos de juros
+2026-11-06 13:34:07 | INFO     |   ⚠️  Nenhum registo de juros
+2026-11-06 13:34:07 | INFO     | 
+PASSO 6: Exibindo mapas de receitas...
+2026-11-06 13:34:07 | INFO     | 
+========================================================================================================================
+2026-11-06 13:34:07 | INFO     | MAPAS DE RECEITAS - VISUALIZAÇÃO
+2026-11-06 13:34:07 | INFO     | ========================================================================================================================
+2026-11-06 13:34:07 | INFO     | 
+📊 QUOTAS NORMAIS
+2026-11-06 13:34:07 | INFO     | ------------------------------------------------------------------------------------------------------------------------
+2026-11-06 13:34:07 | INFO     |  FRACCAO    JAN   FEV   MAR    ABR   MAI    JUN    JUL   AGO    SET   OUT  NOV  DEZ   TOTAL SALDO_ANT   SALDO
+R/c Esq.  18.00 18.00 18.00  18.00 18.00  18.00  18.00 18.00  18.00 18.00 0.00 0.00  180.00      0.00  -36.00
+R/c Dto.  16.00 16.00 16.00  16.00 16.00   0.00  16.00 16.00  16.00 32.00 0.00 0.00  160.00      0.00  -32.00
+ 1º Esq.   0.00  0.00  0.00   0.00  0.00   0.00 120.00  0.00   0.00  0.00 0.00 0.00  120.00      0.00 -120.00
+ 1º Dto.  18.00 18.00 18.00  18.00 18.00  18.00  18.00 18.00  18.00 18.00 0.00 0.00  180.00      0.00  -36.00
+ 2º Esq. 364.00 28.00 28.00  28.00 28.00  28.00  28.00 28.00  28.00  0.00 0.00 0.00  588.00   -336.00  -84.00
+ 2º Dto.   0.00  0.00  0.00  96.00  0.00  48.00   0.00  0.00  72.00 24.00 0.00 0.00  240.00      0.00  -48.00
+  TOTAIS 416.00 80.00 80.00 176.00 80.00 112.00 200.00 80.00 152.00 92.00 0.00 0.00 1468.00   -336.00 -356.00
+2026-11-06 13:34:07 | INFO     | 
+📊 QUOTAS EXTRAS
+2026-11-06 13:34:07 | INFO     | ------------------------------------------------------------------------------------------------------------------------
+2026-11-06 13:34:07 | INFO     |  FRACCAO     JAN    FEV    MAR    ABR    MAI    JUN    JUL    AGO    SET    OUT  NOV  DEZ   TOTAL SALDO_ANT   SALDO
+R/c Esq.   46.00  46.00  46.00  46.00  46.00  46.00  46.00  46.00  46.00  46.00 0.00 0.00  460.00      0.00  -92.00
+R/c Dto.   40.00  40.00  40.00  40.00  40.00   0.00  40.00  40.00  40.00  80.00 0.00 0.00  400.00      0.00  -80.00
+ 1º Esq.    0.00   0.00   0.00   0.00   0.00   0.00 306.00   0.00   0.00   0.00 0.00 0.00  306.00      0.00 -306.00
+ 1º Dto.   45.00  45.00  45.00  45.00  45.00  45.00  45.00  45.00  45.00  45.00 0.00 0.00  450.00      0.00  -90.00
+ 2º Esq.  923.00  71.00  71.00  71.00  71.00  71.00  71.00  71.00  71.00   0.00 0.00 0.00 1491.00   -852.00 -213.00
+ 2º Dto.    0.00   0.00   0.00 244.00   0.00 122.00   0.00   0.00 183.00  61.00 0.00 0.00  610.00      0.00 -122.00
+  TOTAIS 1054.00 202.00 202.00 446.00 202.00 284.00 508.00 202.00 385.00 232.00 0.00 0.00 3717.00   -852.00 -903.00
+2026-11-06 13:34:07 | INFO     | 
+========================================================================================================================
+2026-11-06 13:34:07 | INFO     | 
+================================================================================
+2026-11-06 13:34:07 | INFO     | ✅ PROCESSAMENTO CONCLUÍDO COM SUCESSO! (VERSÃO SIMPLIFICADA)
+2026-11-06 13:34:07 | INFO     | ================================================================================
+2026-11-06 13:34:17 | INFO     | 
+================================================================================
+2026-11-06 13:34:17 | INFO     | PROCESSAMENTO DE DESPESAS (SQL / API canónica)
+2026-11-06 13:34:17 | INFO     | ================================================================================
+2026-11-06 13:34:17 | INFO     | PASSO 1: Aglutinando movimentos (bancos+caixa)...
+2026-11-06 13:34:17 | INFO     | 
+================================================================================
+2026-11-06 13:34:17 | INFO     | 🔄 AGLUTINAÇÃO DE MOVIMENTOS (SQL / bancos+caixa)
+2026-11-06 13:34:17 | INFO     | ================================================================================
+2026-11-06 13:34:17 | INFO     |   🧹 Removidos 1 movimentos duplicados
+2026-11-06 13:34:17 | INFO     |   ✅ bancos: 81 registos
+2026-11-06 13:34:17 | INFO     |   ✅ caixa: 1 registos
+2026-11-06 13:34:17 | INFO     | 
+  📊 Total aglutinado: 82 movimentos únicos
+2026-11-06 13:34:17 | INFO     | ================================================================================
+2026-11-06 13:34:17 | INFO     | 
+PASSO 2: Agregando despesas por conta e mês...
+2026-11-06 13:34:17 | INFO     |   → 28 despesas encontradas para processar
+2026-11-06 13:34:17 | INFO     |   → Agregação concluída: 5 contas com despesas
+2026-11-06 13:34:17 | INFO     | 
+PASSO 3: Gerando tabela de despesas...
+2026-11-06 13:34:17 | INFO     |   → Gerando tabela com 5 contas
+2026-11-06 13:34:17 | INFO     |   ✓ Condomínio Garagens: Total anual = 129.72
+2026-11-06 13:34:17 | INFO     |   ✓ Eletricidade: Total anual = 73.59
+2026-11-06 13:34:17 | INFO     |   ✓ Empregada: Total anual = 540.00
+2026-11-06 13:34:17 | INFO     |   ✓ Manutencao Cgd: Total anual = 83.20
+2026-11-06 13:34:17 | INFO     |   ✓ Produtos Limpeza: Total anual = 9.90
+2026-11-06 13:34:17 | INFO     | 
+  ✓ TOTAIS: 836.41
+2026-11-06 13:34:17 | INFO     | 
+Tabela de despesas gravada em C:\Users\jclpa\Documents\Scripts\Bancos\corrente (25 células/linhas via SQL)
+2026-11-06 13:34:17 | INFO     | Total de registos: 6 (incluindo TOTAIS)
+2026-11-06 13:34:17 | INFO     | 
+PASSO 4: Exibindo resultado...
+2026-11-06 13:34:17 | INFO     | 
+========================================================================================================================
+2026-11-06 13:34:17 | INFO     | TABELA DE DESPESAS - PIVOT TABLE
+2026-11-06 13:34:17 | INFO     | ========================================================================================================================
+2026-11-06 13:34:17 | INFO     |            DESPESAS   JAN   FEV    MAR   ABR   MAI   JUN    JUL   AGO  SET   OUT  NOV  DEZ  TOTAL
+Condomínio Garagens  0.00  0.00   0.00  0.00  0.00  0.00 129.72  0.00 0.00  0.00 0.00 0.00 129.72
+       Eletricidade  0.00 15.72   0.00 14.56  0.00 14.72   0.00 14.38 0.00 14.21 0.00 0.00  73.59
+          Empregada 60.00  0.00 120.00 60.00 60.00 60.00  60.00 60.00 0.00 60.00 0.00 0.00 540.00
+     Manutencao Cgd  8.32  8.32   8.32  8.32  8.32  8.32   8.32  8.32 8.32  8.32 0.00 0.00  83.20
+   Produtos Limpeza  0.00  0.00   0.00  0.00  0.00  0.00   9.90  0.00 0.00  0.00 0.00 0.00   9.90
+             TOTAIS 68.32 24.04 128.32 82.88 68.32 83.04 207.94 82.70 8.32 82.53 0.00 0.00 836.41
+2026-11-06 13:34:17 | INFO     | ========================================================================================================================
+2026-11-06 13:34:17 | INFO     | 
+>>> TOTAL GERAL DE DESPESAS: 836.41 €
+2026-11-06 13:34:17 | INFO     | >>> MÊS COM MAIOR DESPESA: JUL (207.94 €)
+2026-11-06 13:34:17 | INFO     | 
+================================================================================
+2026-11-06 13:34:17 | INFO     | PROCESSO CONCLUÍDO COM SUCESSO!
+2026-11-06 13:34:17 | INFO     | ================================================================================
+2026-11-06 13:34:24 | INFO     | 
+================================================================================
+2026-11-06 13:34:24 | INFO     | 📊 GERAÇÃO DE BALANÇO ANUAL CONSOLIDADO
+2026-11-06 13:34:24 | INFO     | ================================================================================
+2026-11-06 13:34:24 | INFO     |   ✓ Ano exercício lido de Configs: 2026
+2026-11-06 13:34:24 | INFO     |   ✓ Ano da 1ª administração lido de Configs: 2005
+2026-11-06 13:34:24 | INFO     |   ✓ Administração corrente calculada: 22ª (2026 - 2005 + 1)
+2026-11-06 13:34:24 | INFO     | 
+PASSO 1: Carregando dados dos módulos...
+2026-11-06 13:34:24 | INFO     |   ⚠️  Juros está vazio
+2026-11-06 13:34:24 | INFO     |   ✓ Despesas: 5 contas
+2026-11-06 13:34:24 | INFO     |   ✓ Quotas Normais: 1468.00
+2026-11-06 13:34:24 | INFO     |   ✓ Quotas Extras: 3717.00
+2026-11-06 13:34:24 | INFO     |   ✓ Juros: 0.00
+2026-11-06 13:34:24 | INFO     |   ✓ Saldo Poupança (Inicial): 0.00
+2026-11-06 13:34:24 | INFO     |   ✓ Saldo Ordem (Inicial): 6710.15
+2026-11-06 13:34:24 | INFO     |   ✓ Saldo Numerário (Inicial): 0.00
+2026-11-06 13:34:24 | INFO     | 
+PASSO 2: Calculando totais baseados em receitas e despesas...
+2026-11-06 13:34:24 | INFO     |   • Total Despesas: 836.41
+2026-11-06 13:34:24 | INFO     |   • Total Receitas: 5185.00
+2026-11-06 13:34:24 | INFO     |   • Saldo Inicial : 6710.15
+2026-11-06 13:34:24 | INFO     |   • Saldo Exercício (receitas-despesas): 4348.59
+2026-11-06 13:34:24 | INFO     |   • Saldo Final (saldoIn+receitas-despesas): 11058.74
+2026-11-06 13:34:24 | INFO     | 
+PASSO 3: Calculando saldos finais baseados em movimentos...
+2026-11-06 13:34:24 | INFO     |   • Depósito Poupança.F: 0.00
+2026-11-06 13:34:24 | INFO     |   • Depósito Ordem.F: 11058.74
+2026-11-06 13:34:24 | INFO     |   • Numerário Caixa.F: 0.00
+2026-11-06 13:34:24 | INFO     |   • Saldo do Exercício (movimentos): 4348.59
+2026-11-06 13:34:24 | INFO     |   • Saldo Final (movimentos): 11058.74
+2026-11-06 13:34:24 | INFO     | 
+  • Saldo do Exercício (final): 4348.59
+2026-11-06 13:34:24 | INFO     |   • Saldo Final (final): 11058.74
+2026-11-06 13:34:24 | INFO     |   • TOTAL DÉBITOS (Esquerda): 11895.15
+2026-11-06 13:34:24 | INFO     |   • TOTAL CRÉDITOS (Direita): 11895.15
+2026-11-06 13:34:24 | INFO     | 
+  ✓ Validação OK: Débitos = Créditos (11895.15)
+2026-11-06 13:34:24 | INFO     | 
+PASSO 4: Montando estrutura do balanço...
+2026-11-06 13:34:24 | INFO     |   ✓ 29 registos salvos (balanco wide) em C:\Users\jclpa\Documents\Scripts\Bancos\corrente
+2026-11-06 13:34:24 | INFO     | 
+========================================================================================================================
+2026-11-06 13:34:24 | INFO     |                                               BALANÇO DA 22ª ADMINISTRAÇÃO
+2026-11-06 13:34:24 | INFO     | ========================================================================================================================
+2026-11-06 13:34:24 | INFO     | DÉBITOS (ESQUERDA)                                          CRÉDITOS (DIREITA)
+2026-11-06 13:34:24 | INFO     | ------------------------------------------------------------------------------------------------------------------------
+2026-11-06 13:34:24 | INFO     | DESPESAS ANO CORRENTE                                       SALDO ADMINISTRAÇÃO ANTERIOR
+2026-11-06 13:34:24 | INFO     | Condomínio Garagens                                 129.72  a) Depósito Poupança
+2026-11-06 13:34:24 | INFO     | Eletricidade                                         73.59  b) Depósito Ordem                                  6710.15
+2026-11-06 13:34:24 | INFO     | Empregada                                           540.00  c) Numerário Caixa
+2026-11-06 13:34:24 | INFO     | Manutencao Cgd                                       83.20  Total saldo anterior (TSA)                         6710.15
+2026-11-06 13:34:24 | INFO     | Produtos Limpeza                                      9.90
+2026-11-06 13:34:24 | INFO     |                                                             RECEITAS ANO CORRENTE
+2026-11-06 13:34:24 | INFO     |                                                             a) Quotas Normais                                  1468.00
+2026-11-06 13:34:24 | INFO     |                                                             b) Quotas Extras                                   3717.00
+2026-11-06 13:34:24 | INFO     |                                                             c) Juros
+2026-11-06 13:34:24 | INFO     | Total despesas (TD)                                 836.41  Total receitas (TR)                                5185.00
+2026-11-06 13:34:24 | INFO     | Saldo Final                                       11058.74
+2026-11-06 13:34:24 | INFO     | TOTAL                                             11895.15  TOTAL                                             11895.15
+2026-11-06 13:34:24 | INFO     | ========================================================================================================================
+2026-11-06 13:34:24 | INFO     | 
+================================================================================
+2026-11-06 13:34:24 | INFO     | 💾 ATUALIZAÇÃO DE SALDOS FINAIS (COM SALDO EXERCÍCIO E FINAL)
+2026-11-06 13:34:24 | INFO     | ================================================================================
+2026-11-06 13:34:24 | INFO     |   ⚠️  Juros está vazio
+2026-11-06 13:34:24 | INFO     | 
+PASSO 1: Carregando saldos iniciais...
+2026-11-06 13:34:24 | INFO     |   ✓ Depósito Poupança (Inicial): 0.00
+2026-11-06 13:34:24 | INFO     |   ✓ Depósito Ordem (Inicial): 6710.15
+2026-11-06 13:34:24 | INFO     |   ✓ Numerário Caixa (Inicial): 0.00
+2026-11-06 13:34:24 | INFO     |   ✓ Juros (para gravação em Saldos): 0.00
+2026-11-06 13:34:24 | INFO     | 
+PASSO 2: Calculando Depósito Poupança Final a partir de DPrazo...
+2026-11-06 13:34:24 | INFO     |   • Soma depósitos encontrados: +0.00
+2026-11-06 13:34:24 | INFO     |   • Soma juros encontrados: +0.00
+2026-11-06 13:34:24 | INFO     |   • Soma levantamentos encontrados: 0.00
+2026-11-06 13:34:24 | INFO     |   • Movimento líquido poupança: 0.00
+2026-11-06 13:34:24 | INFO     |   ✓ Depósito Poupança_F calculado: 0.00
+2026-11-06 13:34:24 | INFO     |   (baseado em 0 depósitos, 0 juros e 0 levantamentos)
+2026-11-06 13:34:24 | INFO     |       (último movimento em: 2026-01-01)
+2026-11-06 13:34:24 | INFO     | 
+PASSO 3: Obtendo Depósito Ordem Final...
+2026-11-06 13:34:24 | INFO     |   ✓ Depósito Ordem Final: 11058.74
+2026-11-06 13:34:24 | INFO     | 
+PASSO 4: Obtendo Numerário Caixa Final...
+2026-11-06 13:34:24 | INFO     |   ✓ Numerário Caixa Final: 0.00
+2026-11-06 13:34:24 | INFO     | 
+PASSO 5: Calculando Saldo Exercício e Saldo Final...
+2026-11-06 13:34:24 | INFO     |   • Soma Saldos Iniciais: 6710.15
+2026-11-06 13:34:24 | INFO     |   • Soma Saldos Finais: 11058.74
+2026-11-06 13:34:24 | INFO     |   ✓ Saldo Exercício: 4348.59
+2026-11-06 13:34:24 | INFO     |   ✓ Saldo Final: 11058.74
+2026-11-06 13:34:24 | INFO     | 
+PASSO 6: Atualizando tabela Saldos...
+2026-11-06 13:34:24 | INFO     |   ✓ Gravado POUPANÇA_F: 0.00
+2026-11-06 13:34:24 | INFO     |   ✓ Gravado ORDEM_F: 11058.74
+2026-11-06 13:34:24 | INFO     |   ✓ Gravado CAIXA_F: 0.00
+2026-11-06 13:34:24 | INFO     |   ✓ Juros gravados em Saldos: 0.00
+2026-11-06 13:34:24 | INFO     | 
+================================================================================
+2026-11-06 13:34:24 | INFO     | ✅ SALDOS FINAIS ATUALIZADOS COM SUCESSO
+2026-11-06 13:34:24 | INFO     | ================================================================================
+2026-11-06 13:34:24 | INFO     | 
+Resumo dos Saldos:
+2026-11-06 13:34:24 | INFO     |   • Depósito Poupança_F:          0.00 €   ← calculado de DPrazo
+2026-11-06 13:34:24 | INFO     |   • Depósito Ordem_F:         11058.74 €
+2026-11-06 13:34:24 | INFO     |   • Numerário Caixa_F:            0.00 €
+2026-11-06 13:34:24 | INFO     |   ────────────────────────────────────
+2026-11-06 13:34:24 | INFO     |   • SALDO EXERCÍCIO:           4348.59 €
+2026-11-06 13:34:24 | INFO     |   • SALDO FINAL:              11058.74 €
+2026-11-06 13:34:24 | INFO     | ================================================================================
+2026-11-06 13:34:53 | INFO     | 
+================================================================================
+2026-11-06 13:34:53 | INFO     | 🤖 INICIANDO ANÁLISE POR IA (Google Gemini)...
+2026-11-06 13:34:53 | INFO     | ================================================================================
+2026-11-06 13:34:53 | INFO     | 🔍 Extraindo dados financeiros da pasta: corrente
+2026-11-06 13:34:53 | INFO     | 📅 Período de análise: 2026
+2026-11-06 13:34:53 | INFO     | 📊 Processando dados do Balanço...
+2026-11-06 13:34:53 | INFO     | ✅ load wide: 29 linhas carregadas de load_balanco_wide
+2026-11-06 13:34:53 | INFO     | 🏦 Processando dados de Saldos...
+2026-11-06 13:34:53 | INFO     | ✅ load wide: 12 linhas carregadas de load_saldos_wide
+2026-11-06 13:34:53 | INFO     | 💰 Processando dados de Receitas (dívidas por fração)...
+2026-11-06 13:34:53 | INFO     | ✅ load wide: 7 linhas carregadas de load_receitas_wide
+2026-11-06 13:34:53 | INFO     | ✅ load wide: 7 linhas carregadas de load_receitas_wide
+2026-11-06 13:34:53 | INFO     | 🔄 A chamar o modelo: gemini-3.5-flash
+2026-11-06 13:35:18 | INFO     | ✅ Modelo gemini-3.5-flash respondeu com sucesso!
+2026-11-06 13:35:18 | INFO     | ✅ Relatório TXT salvo: C:\Users\jclpa\Documents\Scripts\Bancos\docs\Relatorio_Analise_IA.txt
+2026-11-06 13:35:18 | INFO     | 📄 PDF da IA salvo: C:\Users\jclpa\Documents\Scripts\Bancos\docs\Relatorio_Analise_IA.pdf
+2026-11-06 13:35:18 | INFO     | 
+📝 Trecho do relatório:
+------------------------------------------------------------
+2026-11-06 13:35:18 | INFO     | Relatório contabilístico e financeiro sobre o exercício de 2026, elaborado nos termos das normas contabilísticas aplicáveis à gestão de condomínios em Portugal.
+
+### 1. Síntese executiva
+O exercício de 2026 encerrou com um resultado positivo de **€4.348,59**, decorrente de receitas totais de **€5.185,00** e despesas globais de **€836,41**. A estrutura de rendimentos apresenta uma forte dependência de quotas extraordinárias, que representaram **71,7%** da receita total. O rácio de cobertura de de...
